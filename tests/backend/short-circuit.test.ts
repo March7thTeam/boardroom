@@ -35,6 +35,10 @@ interface ApiBody {
   action?: string;
   outcome?: string;
   evidence_count?: number;
+  attempts_abandoned?: number;
+  was_paused?: boolean;
+  round?: number;
+  contract_state?: string;
   short_circuit?: { level: string; action: string; reason: string; bypassed: string[] };
   session_id?: string;
   proposal_id?: string;
@@ -164,28 +168,46 @@ async function fixture() {
 
   function insertCard(input: {
     id: string;
-    status: "open" | "review";
+    status: "open" | "engaged" | "running" | "review" | "closed";
     createdByType?: "user" | "agent";
     createdById?: string;
     requesterAgentId?: string | null;
     assigneeAgentId?: string | null;
     pausedAt?: string | null;
+    round?: number;
+    leaseOwner?: string | null;
   }): void {
     db.sqlite.prepare(
       `INSERT INTO cards
          (id, project_id, title, status, outcome, version, round, requester_agent_id,
-          assignee_agent_id, criteria_json, paused_at, created_by_type, created_by_id)
-       VALUES (?1, ?2, 'seeded', ?3, NULL, 1, 1, ?4, ?5, '[]', ?6, ?7, ?8)`,
+          assignee_agent_id, criteria_json, paused_at, lease_owner, created_by_type, created_by_id)
+       VALUES (?1, ?2, 'seeded', ?3, NULL, 1, ?4, ?5, ?6, '[]', ?7, ?8, ?9, ?10)`,
     ).run(
       input.id,
       P,
       input.status,
+      input.round ?? 1,
       input.requesterAgentId ?? null,
       input.assigneeAgentId ?? null,
       input.pausedAt ?? null,
+      input.leaseOwner ?? null,
       input.createdByType ?? "user",
       input.createdById ?? OWNER,
     );
+  }
+
+  function seedAttempt(
+    cardId: string,
+    contractId: string,
+    status: "issued" | "running" = "issued",
+  ): string {
+    const id = `at_${cardId}`;
+    db.sqlite.prepare(
+      `INSERT INTO attempts
+         (id, card_id, contract_id, agent_id, attempt_no, status, ticket_nonce)
+       VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)`,
+    ).run(id, cardId, contractId, BOT_AGENT_ID, status, `nonce_${cardId}`);
+    return id;
   }
 
   function seedSession(cardId: string, state: "open" | "committed" = "committed"): string {
@@ -252,6 +274,7 @@ async function fixture() {
     seedSession,
     seedContract,
     seedReviewCard,
+    seedAttempt,
   };
 }
 
@@ -468,5 +491,161 @@ describe("admin short-circuit", () => {
     expect(second.body.duplicate).toBe(true);
     const contracts = f.db.sqlite.prepare("SELECT COUNT(*) AS count FROM contracts WHERE card_id = ?").get(cid) as { count: number };
     expect(contracts.count).toBe(1);
+  });
+
+  it("cancels a paused running card and abandons its ticket", async () => {
+    const f = await fixture();
+    f.insertCard({
+      id: "c_cancel",
+      status: "running",
+      assigneeAgentId: BOT_AGENT_ID,
+      pausedAt: "2026-01-01T00:00:00.000Z",
+      leaseOwner: BOT_AGENT_ID,
+    });
+    const contractId = f.seedContract("c_cancel", {
+      proposerAgentId: BOT_AGENT_ID,
+      acceptorUserId: OWNER,
+    });
+    f.seedAttempt("c_cancel", contractId, "running");
+
+    const response = await f.call("/api/v1/cards/c_cancel/short-circuit", {
+      action: "cancel",
+      reason: "abusive card; emergency stop",
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.outcome).toBe("cancelled");
+    expect(response.body.attempts_abandoned).toBe(1);
+    expect(response.body.was_paused).toBe(true);
+    expect(response.body.contract_id).toBe(contractId);
+    expect(response.body.card?.status).toBe("closed");
+    expect(response.body.card?.outcome).toBe("cancelled");
+
+    const card = f.db.sqlite.prepare(
+      "SELECT paused_at, lease_owner FROM cards WHERE id = 'c_cancel'",
+    ).get() as { paused_at: string | null; lease_owner: string | null };
+    expect(card.paused_at).toBeNull();
+    expect(card.lease_owner).toBeNull();
+    const attempt = f.db.sqlite.prepare(
+      "SELECT status FROM attempts WHERE id = 'at_c_cancel'",
+    ).get() as { status: string };
+    expect(attempt.status).toBe("abandoned");
+    const contract = f.db.sqlite.prepare(
+      "SELECT state FROM contracts WHERE id = ?",
+    ).get(contractId) as { state: string };
+    expect(contract.state).toBe("superseded");
+
+    const event = f.db.sqlite.prepare(
+      "SELECT payload_json FROM card_events WHERE card_id = 'c_cancel' ORDER BY seq DESC LIMIT 1",
+    ).get() as { payload_json: string };
+    expect(JSON.parse(event.payload_json)).toMatchObject({
+      action: "cancel",
+      from: "running",
+      to: "closed",
+      outcome: "cancelled",
+      attempts_abandoned: 1,
+      was_paused: true,
+    });
+  });
+
+  it("releases a stuck running card back to engaged and abandons the attempt", async () => {
+    const f = await fixture();
+    f.insertCard({
+      id: "c_release",
+      status: "running",
+      assigneeAgentId: BOT_AGENT_ID,
+      leaseOwner: BOT_AGENT_ID,
+    });
+    const contractId = f.seedContract("c_release", {
+      proposerAgentId: BOT_AGENT_ID,
+      acceptorUserId: OWNER,
+    });
+    f.seedAttempt("c_release", contractId, "issued");
+
+    const response = await f.call("/api/v1/cards/c_release/short-circuit", {
+      action: "release",
+      reason: "execution ticket is stuck; return to engaged",
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.card?.status).toBe("engaged");
+    expect(response.body.attempts_abandoned).toBe(1);
+    expect(response.body.short_circuit?.bypassed).toEqual(["attempt_lease"]);
+
+    const card = f.db.sqlite.prepare(
+      "SELECT status, lease_owner, lease_expires_at FROM cards WHERE id = 'c_release'",
+    ).get() as { status: string; lease_owner: string | null; lease_expires_at: string | null };
+    expect(card).toMatchObject({ status: "engaged", lease_owner: null, lease_expires_at: null });
+    const attempt = f.db.sqlite.prepare(
+      "SELECT status FROM attempts WHERE id = 'at_c_release'",
+    ).get() as { status: string };
+    expect(attempt.status).toBe("abandoned");
+    const contract = f.db.sqlite.prepare(
+      "SELECT state FROM contracts WHERE id = ?",
+    ).get(contractId) as { state: string };
+    expect(contract.state).toBe("active");
+  });
+
+  it("resets a review card to open, starts a new round and retires live work", async () => {
+    const f = await fixture();
+    const contractId = f.seedReviewCard({
+      id: "c_reset",
+      proposerAgentId: BOT_AGENT_ID,
+      evidence: true,
+    });
+
+    const response = await f.call("/api/v1/cards/c_reset/short-circuit", {
+      action: "reset",
+      reason: "platform bug left the card in review",
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.card?.status).toBe("open");
+    expect(response.body.card?.round).toBe(2);
+    expect(response.body.round).toBe(2);
+    expect(response.body.short_circuit?.bypassed).toEqual(["active_work"]);
+
+    const card = f.db.sqlite.prepare(
+      "SELECT status, round, assignee_agent_id, verifier_id, evidence_hash FROM cards WHERE id = 'c_reset'",
+    ).get() as Record<string, unknown>;
+    expect(card).toMatchObject({
+      status: "open",
+      round: 2,
+      assignee_agent_id: null,
+      verifier_id: null,
+      evidence_hash: null,
+    });
+    const contract = f.db.sqlite.prepare(
+      "SELECT state FROM contracts WHERE id = ?",
+    ).get(contractId) as { state: string };
+    expect(contract.state).toBe("superseded");
+    const evidence = f.db.sqlite.prepare(
+      "SELECT COUNT(*) AS count FROM evidence WHERE card_id = 'c_reset'",
+    ).get() as { count: number };
+    expect(evidence.count).toBe(1);
+  });
+
+  it("rejects release/reset on the wrong state and cancel by a plain member", async () => {
+    const f = await fixture();
+    const cid = await f.createCard();
+
+    const release = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+      action: "release",
+      reason: "open cards have no ticket to release",
+    });
+    expect(release.status).toBe(409);
+    expect(release.body.error?.code).toBe("SHORT_CIRCUIT_STATE");
+
+    const reset = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+      action: "reset",
+      reason: "open cards are already open",
+    });
+    expect(reset.status).toBe(409);
+    expect(reset.body.error?.code).toBe("SHORT_CIRCUIT_STATE");
+
+    const memberCancel = await f.call(
+      `/api/v1/cards/${cid}/short-circuit`,
+      { action: "cancel", reason: "member cannot stop the card" },
+      MEMBER_EMAIL,
+    );
+    expect(memberCancel.status).toBe(403);
+    expect(memberCancel.body.error?.code).toBe("SHORT_CIRCUIT_FORBIDDEN");
   });
 });

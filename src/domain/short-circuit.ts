@@ -2,12 +2,15 @@ import { HttpError } from "../lib/http-error";
 import type { CardRow } from "../types";
 
 export type ShortCircuitLevel = "project_owner" | "instance_admin";
-export type ShortCircuitAction = "engage" | "verify";
+export type ShortCircuitAction = "engage" | "verify" | "cancel" | "release" | "reset";
 export type ShortCircuitBypass =
   | "proposal"
   | "agent_acceptance"
   | "evidence_required"
-  | "verifier_conflict";
+  | "verifier_conflict"
+  | "active_work"
+  | "attempt_lease"
+  | "round_limit";
 
 export interface ShortCircuitActor {
   globalAdmin: boolean;
@@ -39,20 +42,34 @@ export function assertShortCircuitLevel(
 }
 
 /**
- * Short-circuit is deliberately narrow: it only skips the two gates that
- * dead-end the normal protocol. It is not a generic "set any status" escape.
+ * Short-circuit is a bounded governance escape hatch, not a generic "set any
+ * status" endpoint. Each action has an explicit from/to contract:
+ *
+ * - engage  open -> engaged        skip proposal + agent acceptance
+ * - verify  review -> closed       skip evidence + verifier conflict
+ * - cancel  any non-closed -> closed(cancelled)  abuse / emergency stop
+ * - release running -> engaged     abandon ticket + clear lease
+ * - reset   engaged|running|review -> open       platform-bug recovery
  */
 export function assertShortCircuitState(action: ShortCircuitAction, card: CardRow): void {
-  if (card.paused_at) {
+  const allowed: Record<ShortCircuitAction, readonly string[]> = {
+    engage: ["open"],
+    verify: ["review"],
+    cancel: ["open", "engaged", "running", "review"],
+    release: ["running"],
+    reset: ["engaged", "running", "review"],
+  };
+  // Cancelling a paused card is the whole point of the emergency stop; every
+  // other action must resume it first so the normal pause invariant holds.
+  if (action !== "cancel" && card.paused_at) {
     throw new HttpError(409, "CARD_PAUSED", "card is paused");
   }
-  const expected = action === "engage" ? "open" : "review";
-  if (card.status !== expected) {
+  if (!allowed[action].includes(card.status)) {
     throw new HttpError(
       409,
       "SHORT_CIRCUIT_STATE",
-      `short-circuit ${action} requires a card in ${expected}`,
-      { action, from: card.status, expected },
+      `short-circuit ${action} does not allow a card in ${card.status}`,
+      { action, from: card.status, allowed: allowed[action] },
     );
   }
 }

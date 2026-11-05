@@ -315,15 +315,20 @@ export const api = {
           reasons?: Array<{ key?: string; message: string; pass?: boolean }>;
           score?: number;
           rule_version?: string;
+        }
+      | {
+          action: "cancel" | "release" | "reset";
+          message_id?: string;
+          reason: string;
         },
   ): Promise<
     {
       card: Card;
       level: "project_owner" | "instance_admin";
-      action: "engage" | "verify";
+      action: "engage" | "verify" | "cancel" | "release" | "reset";
       short_circuit: {
         level: "project_owner" | "instance_admin";
-        action: "engage" | "verify";
+        action: "engage" | "verify" | "cancel" | "release" | "reset";
         reason: string;
         bypassed: string[];
       };
@@ -333,6 +338,9 @@ export const api = {
       verdict?: "pass" | "reject";
       outcome?: string;
       evidence_count?: number;
+      attempts_abandoned?: number;
+      was_paused?: boolean;
+      round?: number;
     } & WriteReceipt
   > {
     return request(

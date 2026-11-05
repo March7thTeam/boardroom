@@ -133,6 +133,21 @@ const shortCircuitSchema = z.discriminatedUnion("action", [
     score: z.number().min(0).max(1).optional(),
     rule_version: z.string().max(50).optional(),
   }),
+  z.object({
+    action: z.literal("cancel"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
+  z.object({
+    action: z.literal("release"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
+  z.object({
+    action: z.literal("reset"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
 ]);
 
 interface CardWithNames extends CardRow {
@@ -879,11 +894,6 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
   const card = await loadCardForUser(c, c.req.param("cid"));
   const body = await parseBody(c, shortCircuitSchema);
 
-  if (body.message_id) {
-    const duplicate = await findExistingCardMessage(c, card.id, body.message_id);
-    if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
-  }
-
   const membership = await c.env.DB.prepare(
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
@@ -894,6 +904,12 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     projectRole: membership?.role ?? null,
   });
   assertShortCircuitLevel(level);
+
+  if (body.message_id) {
+    const duplicate = await findExistingCardMessage(c, card.id, body.message_id);
+    if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
+  }
+
   assertShortCircuitState(body.action, card);
 
   const now = nowIso();
@@ -1052,6 +1068,202 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
         event_pending: eventPending,
       },
       eventPending ? 202 : 201,
+    );
+  }
+
+  if (body.action === "cancel") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const related = retireCardWork(c.env.DB, card, now, "superseded", "cancelled");
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'closed', outcome = 'cancelled', version = version + 1,
+              lease_owner = NULL, lease_expires_at = NULL, paused_at = NULL, updated_at = ?1
+        WHERE id = ?2 AND version = ?3 AND status <> 'closed'`,
+    ).bind(now, card.id, card.version);
+    const bypassed = ["active_work"] as const;
+    const attemptsAbandoned = attempts.results.length;
+    const wasPaused = Boolean(card.paused_at);
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.short_circuited",
+      {
+        action: "cancel",
+        level,
+        reason: body.reason,
+        bypassed,
+        short_circuit: { level, action: "cancel", reason: body.reason, bypassed },
+        from: card.status,
+        to: "closed",
+        outcome: "cancelled",
+        attempts_abandoned: attemptsAbandoned,
+        was_paused: wasPaused,
+        contract_state: contract ? "superseded" : null,
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [...related, cardWrite],
+      { level, action: "cancel", from: card.status, to: "closed", outcome: "cancelled", attempts_abandoned: attemptsAbandoned, bypassed },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "cancel",
+        short_circuit: { level, action: "cancel", reason: body.reason, bypassed },
+        outcome: "cancelled",
+        attempts_abandoned: attemptsAbandoned,
+        was_paused: wasPaused,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
+    );
+  }
+
+  if (body.action === "release") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const leaseOwner = card.lease_owner;
+    const attemptWrite = guardedCardWrite(
+      c.env.DB,
+      card,
+      `UPDATE attempts SET status = 'abandoned', ended_at = ?1
+        WHERE card_id = ?2 AND status IN ('issued','running') AND /* current_card */`,
+      [now, card.id],
+    );
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'engaged', version = version + 1,
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
+        WHERE id = ?2 AND version = ?3 AND status = 'running' AND paused_at IS NULL`,
+    ).bind(now, card.id, card.version);
+    const bypassed = ["attempt_lease"] as const;
+    const attemptsAbandoned = attempts.results.length;
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.short_circuited",
+      {
+        action: "release",
+        level,
+        reason: body.reason,
+        bypassed,
+        short_circuit: { level, action: "release", reason: body.reason, bypassed },
+        from: "running",
+        to: "engaged",
+        attempt_ids: attempts.results.map((attempt) => attempt.id),
+        attempts_abandoned: attemptsAbandoned,
+        lease_owner: leaseOwner,
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [attemptWrite, cardWrite],
+      { level, action: "release", from: "running", to: "engaged", attempts_abandoned: attemptsAbandoned, bypassed },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "release",
+        short_circuit: { level, action: "release", reason: body.reason, bypassed },
+        attempts_abandoned: attemptsAbandoned,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
+    );
+  }
+
+  if (body.action === "reset") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const evidence = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
+    )
+      .bind(card.id)
+      .first<{ count: number }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const related = retireCardWork(c.env.DB, card, now, "superseded", "cancelled");
+    const nextRound = card.round + 1;
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'open', outcome = NULL, round = ?1,
+              verifier_id = NULL, verdict_reasons_json = NULL, evidence_hash = NULL,
+              assignee_agent_id = NULL, assignee_user_id = NULL,
+              lease_owner = NULL, lease_expires_at = NULL, paused_at = NULL,
+              version = version + 1, updated_at = ?2
+        WHERE id = ?3 AND version = ?4 AND status IN ('engaged','running','review')`,
+    ).bind(nextRound, now, card.id, card.version);
+    const roundLimitBypassed = nextRound > 5;
+    const bypassed = roundLimitBypassed
+      ? (["active_work", "round_limit"] as const)
+      : (["active_work"] as const);
+    const attemptsAbandoned = attempts.results.length;
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.short_circuited",
+      {
+        action: "reset",
+        level,
+        reason: body.reason,
+        bypassed,
+        short_circuit: { level, action: "reset", reason: body.reason, bypassed },
+        from: card.status,
+        to: "open",
+        round: nextRound,
+        round_limit_bypassed: roundLimitBypassed,
+        attempts_abandoned: attemptsAbandoned,
+        evidence_count: Number(evidence?.count ?? 0),
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [...related, cardWrite],
+      { level, action: "reset", from: card.status, to: "open", round: nextRound, attempts_abandoned: attemptsAbandoned, bypassed },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "reset",
+        short_circuit: { level, action: "reset", reason: body.reason, bypassed },
+        round: nextRound,
+        attempts_abandoned: attemptsAbandoned,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
     );
   }
 

@@ -328,7 +328,10 @@ export function CardDrawer({
   });
 
   const shortCircuitMutation = useMutation({
-    mutationFn: (input: { action: "engage" | "verify"; verdict?: "pass" | "reject" }) => {
+    mutationFn: (input: {
+      action: "engage" | "verify" | "cancel" | "release" | "reset";
+      verdict?: "pass" | "reject";
+    }) => {
       const reason = shortCircuitReason.trim();
       if (reason.length < 8) throw new Error(t("shortCircuit.needReason"));
       if (input.action === "engage") {
@@ -339,14 +342,21 @@ export function CardDrawer({
           ...(shortCircuitTarget ? { assignee_agent_id: shortCircuitTarget } : {}),
         });
       }
+      if (input.action === "verify") {
+        return api.shortCircuitCard(cardId, {
+          action: "verify",
+          message_id: crypto.randomUUID(),
+          reason,
+          verdict: input.verdict ?? "pass",
+          reasons: verdictReason.trim()
+            ? [{ message: verdictReason.trim(), pass: input.verdict === "pass" }]
+            : undefined,
+        });
+      }
       return api.shortCircuitCard(cardId, {
-        action: "verify",
+        action: input.action,
         message_id: crypto.randomUUID(),
         reason,
-        verdict: input.verdict ?? "pass",
-        reasons: verdictReason.trim()
-          ? [{ message: verdictReason.trim(), pass: input.verdict === "pass" }]
-          : undefined,
       });
     },
     onSuccess: (result) => {
@@ -1109,7 +1119,7 @@ export function CardDrawer({
                       </div>
                     )}
 
-                    {canShortCircuit && (card.status === "open" || card.status === "review") && (
+                    {canShortCircuit && card.status !== "closed" && (
                       <div className="drawer-action-dialog">
                         <div className="dialog-title">
                           {t("shortCircuit.title")}
@@ -1147,8 +1157,17 @@ export function CardDrawer({
                         {card.status === "review" && passBlockedByEvidence && (
                           <div className="field-hint">{t("shortCircuit.bypassEvidence")}</div>
                         )}
+                        {card.status === "running" && (
+                          <div className="field-hint">{t("shortCircuit.releaseHint")}</div>
+                        )}
+                        {(card.status === "engaged" ||
+                          card.status === "running" ||
+                          card.status === "review") && (
+                          <div className="field-hint">{t("shortCircuit.resetHint")}</div>
+                        )}
+                        <div className="field-hint">{t("shortCircuit.cancelHint")}</div>
                         <div className="form-actions">
-                          {card.status === "open" ? (
+                          {card.status === "open" && (
                             <button
                               type="button"
                               className="btn btn-danger btn-sm"
@@ -1161,7 +1180,8 @@ export function CardDrawer({
                             >
                               {t("shortCircuit.engage")}
                             </button>
-                          ) : (
+                          )}
+                          {card.status === "review" && (
                             <>
                               <button
                                 type="button"
@@ -1185,6 +1205,36 @@ export function CardDrawer({
                               </button>
                             </>
                           )}
+                          {card.status === "running" && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                              onClick={() => shortCircuitMutation.mutate({ action: "release" })}
+                            >
+                              {t("shortCircuit.release")}
+                            </button>
+                          )}
+                          {(card.status === "engaged" ||
+                            card.status === "running" ||
+                            card.status === "review") && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                              onClick={() => shortCircuitMutation.mutate({ action: "reset" })}
+                            >
+                              {t("shortCircuit.reset")}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                            onClick={() => shortCircuitMutation.mutate({ action: "cancel" })}
+                          >
+                            {t("shortCircuit.cancel")}
+                          </button>
                         </div>
                       </div>
                     )}
