@@ -39,13 +39,16 @@ function card(overrides: Partial<CardRow> = {}): CardRow {
 }
 
 describe("short-circuit level resolution", () => {
-  it("lets instance admin win over an explicit project membership", () => {
+  it("prefers an explicit project role over instance admin", () => {
+    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "owner" })).toBe("project_owner");
+    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "admin" })).toBe("project_admin");
     expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "member" })).toBe("instance_admin");
     expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: null })).toBe("instance_admin");
   });
 
-  it("allows a project owner only through the owner role", () => {
+  it("allows project owners and project admins only inside their project", () => {
     expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "owner" })).toBe("project_owner");
+    expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "admin" })).toBe("project_admin");
     expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "member" })).toBeNull();
     expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: null })).toBeNull();
   });

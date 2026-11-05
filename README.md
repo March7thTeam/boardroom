@@ -54,7 +54,7 @@ npm run dev:web   # vite，端口 5173，/api 代理到 8787
 | 首次配置 | 4 步向导：实例名称 → 管理员账号 → 可选首个项目 → 确认并自动登录 |
 | 管理员 | 用户搜索/详情/邀请/启停/软删除/撤销会话/重置密码；最后一个 admin 保护 |
 | 邮件 | SMTP provider（`on`/`starttls`/`off`）、console 开发回退、`email_log`、测试发送与日志查询 |
-| 项目 | 创建、参与者统一视图（人类成员 + Agents）、加入申请审批、owner/member、注册令牌轮换、归档 / 恢复 / 管理员永久删除 |
+| 项目 | 创建、参与者统一视图（人类成员 + Agents）、加入申请审批、owner/admin/member、注册令牌轮换、归档 / 恢复 / 管理员永久删除 |
 | Agent | 项目化身份 + 多项目成员关系、`POST /agent/projects` 加入项目、按项目启停、`/agent/me`（`projects[]`）、`/agent/peers`、`/agent/cards`、协商状态读取、`negotiate`、`tickets`、`runs`、`lease`；Agent 可创建/关闭/重开**自己创建的**卡片 |
 | 卡片 | 创建、列表、详情、编辑、关闭、重开、人类接受提案、`If-Match` 乐观锁 |
 | 协商 | inquiry/proposal/counter/commit、JCS `terms_hash`、HMAC proof、软合同、消息幂等 |
@@ -98,9 +98,9 @@ npm run dev:web   # vite，端口 5173，/api 代理到 8787
 - `GET /projects/:pid/board`
 - `GET/POST /projects/:pid/cards`
 - `GET/PATCH /cards/:cid`
-- `POST /cards/:cid/commit`（仅接受当前轮次的有效最新提案；Agent 建卡由项目 owner 代收，审计记 `on_behalf_of`）
+- `POST /cards/:cid/commit`（仅接受当前轮次的有效最新提案；Agent 建卡由项目 owner/admin 代收，审计记 `on_behalf_of`）
 - `POST /cards/:cid/verify`（人工/规则验收；human 模式下 `engaged` 卡片可直接人工验收，验收说明写成 `attestation` 证据；rule 模式必须 `review`）
-- `POST /cards/:cid/short-circuit`（项目 owner / 实例 admin 管理员操作：`engage` 跳过提案、`verify` 跳过证据门槛、`cancel` 紧急止损、`release` 释放卡死工单、`reset` 重置异常轮次；均写 `card.short_circuited` 审计事件）
+- `POST /cards/:cid/short-circuit`（项目 owner/admin / 实例 admin 管理员操作：`engage` 跳过提案、`verify` 跳过证据门槛、`cancel` 紧急止损、`release` 释放卡死工单、`reset` 重置异常轮次；均写 `card.short_circuited` 审计事件）
 - `POST /cards/:cid/intervene`（reject / redirect / takeover / pause / resume）
 - `POST /cards/:cid/close`、`POST /cards/:cid/reopen`（同步结束旧合同、协商、票据与租约；重开进入新轮次）
 - `GET /cards/:cid/negotiation`（session / proposals / contract / attempts / evidence）
@@ -125,7 +125,7 @@ Agent（`/agent`）：
 
 > Agent 只能创建卡片、关闭/重开自己创建的卡片；不能删除卡片，不能操作人类创建的卡片或其他 Agent 的卡片。Agent 写操作同样要求 `If-Match`（close/reopen）。
 
-> Agent 建卡可由两条路径接受：发起 Agent 自己接受（先 `GET /agent/cards/:cid/negotiation` 读到最新提案的 `terms_hash`，再用 `HMAC-SHA256(agent_secret, terms_hash)` 生成 `proof` 提交 `commit`），或由项目 owner 通过人类端 `POST /api/v1/cards/:cid/commit` 代收；代收会写入合同 `acceptor_user_id`，并在 `card.committed` 事件里记录 `on_behalf_of`。非 owner 的项目成员不能代收（`403`）。
+> Agent 建卡可由两条路径接受：发起 Agent 自己接受（先 `GET /agent/cards/:cid/negotiation` 读到最新提案的 `terms_hash`，再用 `HMAC-SHA256(agent_secret, terms_hash)` 生成 `proof` 提交 `commit`），或由项目 owner/project admin 通过人类端 `POST /api/v1/cards/:cid/commit` 代收；代收会写入合同 `acceptor_user_id`，并在 `card.committed` 事件里记录 `on_behalf_of`。普通项目成员不能代收（`403`）。
 
 > **没有在线对手方时允许自交易**：如果除自己之外，项目里没有其他**在线且可接单**的 Agent（本项目成员关系 `active`，且 20 分钟内有过认证请求或正持有本项目未过期租约），发起者可以对自己提案并接受，合同 `proposer_agent_id` 与 `acceptor_agent_id` 是同一 Agent，`card.committed` 事件带 `self_deal: true` 与判定依据 `self_deal_basis`。只要有对手方在线，`NOT_RESPONDER` / `SELF_COMMIT`（409）立即恢复。
 >

@@ -52,11 +52,11 @@ const updateProjectSchema = z.object({
 
 const addMemberSchema = z.object({
   email: z.string().email(),
-  role: z.enum(["owner", "member"]).default("member"),
+  role: z.enum(["owner", "admin", "member"]).default("member"),
 });
 
 const updateMemberSchema = z.object({
-  role: z.enum(["owner", "member"]),
+  role: z.enum(["owner", "admin", "member"]),
 });
 
 const transferOwnerSchema = z.object({
@@ -85,7 +85,7 @@ const agentStatusSchema = z.object({
   status: z.enum(["active", "disabled"]),
 });
 
-type ProjectMemberRole = "owner" | "member";
+type ProjectMemberRole = "owner" | "admin" | "member";
 
 type ProjectMemberRow = {
   id: string;
@@ -142,7 +142,7 @@ async function assertNotLastOwner(
  */
 function projectSummary(
   project: ProjectRow,
-  role: "owner" | "member",
+  role: ProjectMemberRole,
   access: "member" | "admin" = "member",
 ) {
   return {
@@ -190,11 +190,11 @@ async function projectRoleForUser(
   db: D1Database,
   projectId: string,
   user: UserRow,
-): Promise<"owner" | "member" | null> {
+): Promise<ProjectMemberRole | null> {
   const membership = await db
     .prepare("SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2")
     .bind(projectId, user.id)
-    .first<{ role: "owner" | "member" }>();
+    .first<{ role: ProjectMemberRole }>();
   if (membership) return membership.role;
   return isAdmin(user) ? "owner" : null;
 }
@@ -270,7 +270,7 @@ projectRoutes.get("/projects/archived", requireUser, async (c) => {
           ORDER BY p.archived_at DESC`,
       )
         .bind(user.id)
-        .all<ProjectRow & { role: "owner" | "member"; archived_by_email: string | null }>();
+        .all<ProjectRow & { role: ProjectMemberRole; archived_by_email: string | null }>();
 
   return c.json({
     projects: rows.results.map((row) => ({
@@ -548,7 +548,7 @@ projectRoutes.post(
     ]);
 
     const member = await loadProjectMember(c.env.DB, project.id, user.id);
-    if (existing && member?.role !== body.role) {
+    if (existing?.role === "owner" && member?.role !== "owner") {
       throw new HttpError(409, "LAST_OWNER", "cannot demote or remove the last project owner");
     }
     return c.json({ member }, 201);
@@ -621,10 +621,10 @@ projectRoutes.post(
         `UPDATE project_members SET role = 'member'
           WHERE project_id = ?1 AND role = 'owner'
             AND EXISTS (SELECT 1 FROM project_members
-                         WHERE project_id = ?1 AND user_id = ?2 AND role = 'member')`,
+                         WHERE project_id = ?1 AND user_id = ?2 AND role IN ('member','admin'))`,
       ).bind(project.id, target.id),
       c.env.DB.prepare(
-        "UPDATE project_members SET role = 'owner' WHERE project_id = ?1 AND user_id = ?2 AND role = 'member'",
+        `UPDATE project_members SET role = 'owner' WHERE project_id = ?1 AND user_id = ?2 AND role IN ('member','admin')`,
       ).bind(project.id, target.id),
     ]);
     if ((promoted.meta.changes ?? 0) === 0) {
