@@ -326,4 +326,18 @@ export const en = {
   "project.tokenRotatedIntro": "Save the new enrollment token before continuing. Previous enrollment tokens are revoked; existing Agent credentials are unchanged.",
   "project.tokenAcknowledged": "Token saved",
 
+  "shortCircuit.title": "Admin short-circuit",
+  "shortCircuit.hint": "Governance exception. The reason and every bypassed gate are written to the audit chain.",
+  "shortCircuit.reasonPlaceholder": "Short-circuit reason (at least 8 characters)…",
+  "shortCircuit.engageLabel": "Direct engagement agent",
+  "shortCircuit.engage": "Engage without proposal",
+  "shortCircuit.verifyPass": "Short-circuit pass",
+  "shortCircuit.verifyReject": "Short-circuit reject",
+  "shortCircuit.levelProject": "Project-level",
+  "shortCircuit.levelInstance": "Instance-level",
+  "shortCircuit.needReason": "Enter a reason of at least 8 characters.",
+  "shortCircuit.noAgents": "No active Agent in this project.",
+  "shortCircuit.bypassEvidence": "This pass bypasses the evidence gate and records the bypass.",
+  "shortCircuit.success": "Short-circuit recorded.",
+
 } as const;

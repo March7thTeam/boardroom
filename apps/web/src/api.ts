@@ -298,6 +298,49 @@ export const api = {
     );
   },
 
+  shortCircuitCard(
+    cardId: string,
+    input:
+      | {
+          action: "engage";
+          message_id?: string;
+          reason: string;
+          assignee_agent_id?: string;
+        }
+      | {
+          action: "verify";
+          message_id?: string;
+          reason: string;
+          verdict: "pass" | "reject";
+          reasons?: Array<{ key?: string; message: string; pass?: boolean }>;
+          score?: number;
+          rule_version?: string;
+        },
+  ): Promise<
+    {
+      card: Card;
+      level: "project_owner" | "instance_admin";
+      action: "engage" | "verify";
+      short_circuit: {
+        level: "project_owner" | "instance_admin";
+        action: "engage" | "verify";
+        reason: string;
+        bypassed: string[];
+      };
+      session_id?: string;
+      proposal_id?: string;
+      contract_id?: string;
+      verdict?: "pass" | "reject";
+      outcome?: string;
+      evidence_count?: number;
+    } & WriteReceipt
+  > {
+    return request(
+      `/cards/${encodeURIComponent(cardId)}/short-circuit`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  },
+
   updateProject(
     projectId: string,
     input: {

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, Pencil, RefreshCw, RotateCcw, X } from "lucide-react";
 import { api, ApiError, safeParseCriteriaJson } from "../api";
 import { useI18n } from "../i18n";
-import type { Card, UserProfile } from "../types";
+import type { Card, ProjectRole, UserProfile } from "../types";
 import { OutcomeIcon, StatusIcon } from "./Icons";
 import {
   formatDateTime,
@@ -16,6 +16,7 @@ import {
 type CardDrawerProps = {
   cardId: string;
   projectId: string;
+  projectRole?: ProjectRole;
   fallbackCard?: Card | null;
   agentNameMap: ReadonlyMap<string, string>;
   currentUser: UserProfile;
@@ -35,6 +36,7 @@ function prettyJson(raw: string): string {
 export function CardDrawer({
   cardId,
   projectId,
+  projectRole,
   fallbackCard,
   agentNameMap,
   currentUser,
@@ -76,6 +78,8 @@ export function CardDrawer({
   const [interventionReason, setInterventionReason] = useState("");
   const [redirectPriority, setRedirectPriority] = useState(50);
   const [verdictReason, setVerdictReason] = useState("");
+  const [shortCircuitReason, setShortCircuitReason] = useState("");
+  const [shortCircuitTarget, setShortCircuitTarget] = useState("");
 
   const card = detailQuery.data?.card ?? fallbackCard ?? null;
   const events = useMemo(() => {
@@ -86,6 +90,18 @@ export function CardDrawer({
   const rules = useMemo(
     () => safeParseCriteriaJson(card?.criteria_json ?? null),
     [card?.criteria_json],
+  );
+
+  const canShortCircuit = currentUser.role === "admin" || projectRole === "owner";
+  const shortCircuitReady = shortCircuitReason.trim().length >= 8;
+  const shortCircuitAgentsQuery = useQuery({
+    queryKey: ["project-agents", projectId],
+    queryFn: () => api.getProjectAgents(projectId),
+    enabled: canShortCircuit && card?.status === "open",
+  });
+  const shortCircuitAgents = useMemo(
+    () => (shortCircuitAgentsQuery.data?.agents ?? []).filter((agent) => agent.status === "active"),
+    [shortCircuitAgentsQuery.data],
   );
 
   const assigneeLabel =
@@ -302,6 +318,39 @@ export function CardDrawer({
     onSuccess: (result) => {
       setInterventionReason("");
       setActionBanner({ type: result.event_pending ? "warning" : "success", message: result.event_pending ? t("common.eventPending") : "人工干预已记录。" });
+      refreshCardAndBoard();
+    },
+    onError: handleWriteError,
+  });
+
+  const shortCircuitMutation = useMutation({
+    mutationFn: (input: { action: "engage" | "verify"; verdict?: "pass" | "reject" }) => {
+      const reason = shortCircuitReason.trim();
+      if (reason.length < 8) throw new Error(t("shortCircuit.needReason"));
+      if (input.action === "engage") {
+        return api.shortCircuitCard(cardId, {
+          action: "engage",
+          message_id: crypto.randomUUID(),
+          reason,
+          ...(shortCircuitTarget ? { assignee_agent_id: shortCircuitTarget } : {}),
+        });
+      }
+      return api.shortCircuitCard(cardId, {
+        action: "verify",
+        message_id: crypto.randomUUID(),
+        reason,
+        verdict: input.verdict ?? "pass",
+        reasons: verdictReason.trim()
+          ? [{ message: verdictReason.trim(), pass: input.verdict === "pass" }]
+          : undefined,
+      });
+    },
+    onSuccess: (result) => {
+      setShortCircuitReason("");
+      setActionBanner({
+        type: result.event_pending ? "warning" : "success",
+        message: result.event_pending ? t("common.eventPending") : t("shortCircuit.success"),
+      });
       refreshCardAndBoard();
     },
     onError: handleWriteError,
@@ -1031,6 +1080,86 @@ export function CardDrawer({
                           >
                             驳回
                           </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {canShortCircuit && (card.status === "open" || card.status === "review") && (
+                      <div className="drawer-action-dialog">
+                        <div className="dialog-title">
+                          {t("shortCircuit.title")}
+                          <span className="badge badge-neutral">
+                            {currentUser.role === "admin"
+                              ? t("shortCircuit.levelInstance")
+                              : t("shortCircuit.levelProject")}
+                          </span>
+                        </div>
+                        <div className="field-hint">{t("shortCircuit.hint")}</div>
+                        <textarea
+                          className="textarea"
+                          rows={2}
+                          placeholder={t("shortCircuit.reasonPlaceholder")}
+                          value={shortCircuitReason}
+                          onChange={(e) => setShortCircuitReason(e.target.value)}
+                        />
+                        {card.status === "open" && (
+                          <select
+                            className="select"
+                            value={shortCircuitTarget}
+                            onChange={(e) => setShortCircuitTarget(e.target.value)}
+                          >
+                            <option value="">{t("shortCircuit.engageLabel")}</option>
+                            {shortCircuitAgents.map((agent) => (
+                              <option key={agent.id} value={agent.id}>
+                                {agent.resolved_name || agent.slug}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {card.status === "open" && shortCircuitAgents.length === 0 && (
+                          <div className="field-hint">{t("shortCircuit.noAgents")}</div>
+                        )}
+                        {card.status === "review" && passBlockedByEvidence && (
+                          <div className="field-hint">{t("shortCircuit.bypassEvidence")}</div>
+                        )}
+                        <div className="form-actions">
+                          {card.status === "open" ? (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              disabled={
+                                shortCircuitMutation.isPending ||
+                                !shortCircuitReady ||
+                                !shortCircuitTarget
+                              }
+                              onClick={() => shortCircuitMutation.mutate({ action: "engage" })}
+                            >
+                              {t("shortCircuit.engage")}
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                onClick={() =>
+                                  shortCircuitMutation.mutate({ action: "verify", verdict: "reject" })
+                                }
+                              >
+                                {t("shortCircuit.verifyReject")}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                onClick={() =>
+                                  shortCircuitMutation.mutate({ action: "verify", verdict: "pass" })
+                                }
+                              >
+                                {t("shortCircuit.verifyPass")}
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     )}

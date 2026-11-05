@@ -3,8 +3,16 @@ import type { Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import { assertTransition } from "../domain/state-machine";
-import { buildContractReceipt } from "../domain/negotiation";
+import { buildContractReceipt, termsHash } from "../domain/negotiation";
 import { guardedCardWrite, retireCardWork } from "../domain/execution";
+import {
+  assertShortCircuitLevel,
+  assertShortCircuitState,
+  buildDirectEngageTerms,
+  resolveShortCircuitLevel,
+  verifyBypasses,
+  type ShortCircuitLevel,
+} from "../domain/short-circuit";
 import { resolveProjectAgentReference } from "../domain/agent-projects";
 import { verifierConflict } from "../domain/verification";
 import { HttpError } from "../lib/http-error";
@@ -96,6 +104,35 @@ const interventionSchema = z.object({
     })
     .optional(),
 });
+
+const verifyReasonsSchema = z
+  .array(
+    z.object({
+      key: z.string().max(80).optional(),
+      message: z.string().max(500),
+      pass: z.boolean().optional(),
+    }),
+  )
+  .max(100)
+  .optional();
+
+const shortCircuitSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("engage"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+    assignee_agent_id: z.string().min(1).optional(),
+  }),
+  z.object({
+    action: z.literal("verify"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+    verdict: z.enum(["pass", "reject"]),
+    reasons: verifyReasonsSchema,
+    score: z.number().min(0).max(1).optional(),
+    rule_version: z.string().max(50).optional(),
+  }),
+]);
 
 interface CardWithNames extends CardRow {
   assignee_name: string | null;
@@ -746,6 +783,282 @@ cardRoutes.post("/cards/:cid/intervene", requireUser, async (c) => {
       affected_subtree: affectedSubtree,
       seq,
       event_id: eventId, ...eventReceipt, event_pending: eventPending,
+    },
+    eventPending ? 202 : 200,
+  );
+});
+
+/**
+ * Governance short-circuit. Two levels share the same two actions; the scope
+ * differs: a project owner may act only inside the looked-up project, while an
+ * instance admin may act on any unarchived project (loadCardForUser already
+ * grants that access). Every branch writes one card.short_circuited event and
+ * the usual card CAS, so seq/audit/SSE invariants are unchanged.
+ */
+cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
+  const user = c.get("user");
+  const card = await loadCardForUser(c, c.req.param("cid"));
+  const body = await parseBody(c, shortCircuitSchema);
+
+  if (body.message_id) {
+    const duplicate = await findExistingCardMessage(c, card.id, body.message_id);
+    if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
+  }
+
+  const membership = await c.env.DB.prepare(
+    "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
+  )
+    .bind(card.project_id, user.id)
+    .first<{ role: "owner" | "member" }>();
+  const level: ShortCircuitLevel | null = resolveShortCircuitLevel({
+    globalAdmin: isAdmin(user),
+    projectRole: membership?.role ?? null,
+  });
+  assertShortCircuitLevel(level);
+  assertShortCircuitState(body.action, card);
+
+  const now = nowIso();
+
+  if (body.action === "engage") {
+    const target = body.assignee_agent_id ?? card.assignee_agent_id;
+    if (!target) {
+      throw new HttpError(400, "ASSIGNEE_REQUIRED", "engage requires an assignee agent");
+    }
+    const resolved = await resolveProjectAgentReference(c.env.DB, card.project_id, target);
+    if (!resolved) {
+      throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
+    }
+    if (card.created_by_type === "agent" && card.created_by_id === resolved) {
+      throw new HttpError(409, "SELF_ASSIGNMENT", "cannot directly engage the card creator");
+    }
+    const agent = await c.env.DB.prepare(
+      `SELECT ap.agent_id
+         FROM agent_projects ap
+         JOIN projects p ON p.id = ap.project_id
+        WHERE ap.agent_id = ?1 AND ap.project_id = ?2 AND ap.status = 'active'
+          AND p.archived_at IS NULL`,
+    )
+      .bind(resolved, card.project_id)
+      .first();
+    if (!agent) {
+      throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
+    }
+
+    const existingSession = await c.env.DB.prepare(
+      "SELECT id, state FROM negotiation_sessions WHERE card_id = ?1 AND round = ?2",
+    )
+      .bind(card.id, card.round)
+      .first<{ id: string; state: string }>();
+    if (existingSession) {
+      if (existingSession.state === "open") {
+        throw new HttpError(409, "NEGOTIATION_OPEN", "an open negotiation session already exists; use commit");
+      }
+      throw new HttpError(409, "SHORT_CIRCUIT_STATE", "the current round already has a negotiation record", {
+        action: body.action,
+        session_id: existingSession.id,
+        session_state: existingSession.state,
+      });
+    }
+    const activeContract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    if (activeContract) {
+      throw new HttpError(409, "CONTRACT_CONFLICT", "an active contract already exists for this card");
+    }
+
+    const terms = buildDirectEngageTerms({
+      card,
+      assigneeAgentId: resolved,
+      level,
+      actorUserId: user.id,
+      reason: body.reason,
+      now,
+    });
+    const termsJson = JSON.stringify(terms);
+    const hash = await termsHash(terms);
+    const sessionId = newId("ns");
+    const proposalId = newId("p");
+    const contractId = newId("ct");
+    const proofJson = JSON.stringify({
+      type: "admin_short_circuit",
+      level,
+      by_type: "user",
+      by_id: user.id,
+      reason: body.reason,
+      accepted_at: now,
+      synthetic: true,
+    });
+    const bypassed = ["proposal", "agent_acceptance"] as const;
+
+    const mutations = [
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO negotiation_sessions
+           (id, card_id, initiator_agent_id, initiator_user_id, responder_agent_id, round,
+            state, created_at, closed_at)
+         SELECT ?1, ?2, NULL, ?3, ?4, ?5, 'committed', ?6, ?6
+          WHERE /* current_card */
+            AND NOT EXISTS (SELECT 1 FROM negotiation_sessions WHERE card_id = ?2 AND round = ?5)
+            AND NOT EXISTS (SELECT 1 FROM contracts WHERE card_id = ?2 AND state = 'active')`,
+        [sessionId, card.id, user.id, resolved, card.round, now],
+      ),
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO proposals
+           (id, session_id, from_agent_id, seq_in_session, terms_json, terms_hash, status, created_at)
+         SELECT ?1, ?2, ?3, 1, ?4, ?5, 'accepted', ?6
+          WHERE /* current_card */
+            AND EXISTS (SELECT 1 FROM negotiation_sessions WHERE id = ?2 AND state = 'committed')`,
+        [proposalId, sessionId, resolved, termsJson, hash, now],
+      ),
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO contracts
+           (id, card_id, session_id, proposer_agent_id, proposer_user_id, acceptor_agent_id,
+            acceptor_user_id, terms_json, terms_hash, acceptance_proof_json, state, version, created_at)
+         SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, 'active', 1, ?9
+          WHERE /* current_card */
+            AND EXISTS (SELECT 1 FROM proposals WHERE id = ?10 AND status = 'accepted')`,
+        [contractId, card.id, sessionId, resolved, user.id, termsJson, hash, proofJson, now, proposalId],
+      ),
+      c.env.DB.prepare(
+        `UPDATE cards SET status = 'engaged', outcome = NULL, assignee_agent_id = ?1,
+                assignee_user_id = NULL, version = version + 1, updated_at = ?2
+          WHERE id = ?3 AND version = ?4 AND status = 'open' AND paused_at IS NULL
+            AND EXISTS (SELECT 1 FROM contracts WHERE id = ?5 AND state = 'active')`,
+      ).bind(resolved, now, card.id, card.version, contractId),
+    ];
+
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.short_circuited",
+      {
+        action: "engage",
+        level,
+        reason: body.reason,
+        bypassed,
+        short_circuit: { level, action: "engage", reason: body.reason, bypassed },
+        from: "open",
+        to: "engaged",
+        synthetic: true,
+        assignee_agent_id: resolved,
+        session_id: sessionId,
+        proposal_id: proposalId,
+        contract_id: contractId,
+        terms_hash: hash,
+      },
+      body.message_id,
+      mutations,
+      { level, action: "engage", session_id: sessionId, proposal_id: proposalId, contract_id: contractId, terms_hash: hash, bypassed },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "engage",
+        short_circuit: { level, action: "engage", reason: body.reason, bypassed },
+        session_id: sessionId,
+        proposal_id: proposalId,
+        contract_id: contractId,
+        terms_hash: hash,
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 201,
+    );
+  }
+
+  const evidence = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
+  )
+    .bind(card.id)
+    .first<{ count: number }>();
+  const evidenceCount = Number(evidence?.count ?? 0);
+  const contract = await c.env.DB.prepare(
+    "SELECT * FROM contracts WHERE card_id = ?1 AND state = 'active'",
+  )
+    .bind(card.id)
+    .first<ContractRow>();
+  const conflict = contract ? verifierConflict(contract, user.id) : null;
+  const bypassed = verifyBypasses({ verdict: body.verdict, evidenceCount, verifierConflict: conflict });
+  const outcome = body.verdict === "pass" ? "done" : "rejected";
+  assertTransition("verdict", "review", outcome);
+
+  const reasonsJson = JSON.stringify({
+    verdict: body.verdict,
+    reasons: body.reasons ?? [],
+    score: body.score ?? null,
+    rule_version: body.rule_version ?? null,
+    self_reported: true,
+    verified_by: user.id,
+    verified_at: now,
+    short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+  });
+
+  const related = contract
+    ? [
+        guardedCardWrite(
+          c.env.DB,
+          card,
+          `UPDATE contracts SET state = ?1, closed_at = ?2
+            WHERE id = ?3 AND state = 'active' AND /* current_card */`,
+          [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id],
+        ),
+      ]
+    : [];
+  const cardWrite = c.env.DB.prepare(
+    `UPDATE cards SET status = 'closed', outcome = ?1, verifier_id = ?2,
+            verdict_reasons_json = ?3, version = version + 1, updated_at = ?4
+      WHERE id = ?5 AND version = ?6 AND status = 'review' AND paused_at IS NULL`,
+  ).bind(outcome, user.id, reasonsJson, now, card.id, card.version);
+
+  const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+    c,
+    card,
+    "card.short_circuited",
+    {
+      action: "verify",
+      level,
+      reason: body.reason,
+      bypassed,
+      short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+      from: "review",
+      to: "closed",
+      outcome,
+      verdict: body.verdict,
+      evidence_count: evidenceCount,
+      contract_id: contract?.id ?? null,
+      verifier_conflict: conflict,
+      reasons: body.reasons ?? [],
+      score: body.score ?? null,
+      rule_version: body.rule_version ?? null,
+    },
+    body.message_id,
+    [...related, cardWrite],
+    { level, action: "verify", verdict: body.verdict, outcome, evidence_count: evidenceCount, bypassed },
+  );
+  return c.json(
+    {
+      card: updated ?? card,
+      level,
+      action: "verify",
+      short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+      verdict: body.verdict,
+      outcome,
+      evidence_count: evidenceCount,
+      ...(contract ? { contract_id: contract.id } : {}),
+      seq,
+      event_id: eventId,
+      ...receipt,
+      event_pending: eventPending,
     },
     eventPending ? 202 : 200,
   );

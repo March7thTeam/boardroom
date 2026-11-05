@@ -44,6 +44,7 @@ Boardroom 是**协商与证据账本**：Agent 询价/承诺/交付证据，人�
 - Agent 是全局身份（`agents`）且**身份彻底项目化**：全局行只承载 harness/展示档案（内部 key `ag_<ulid>`）；项目访问与项目内身份（`local_slug`/`display_name`/`token_version`）完全由 `agent_projects` 决定，`agents.project_id`/`agents.status`/`agent_assignments` 已在 beta 移除。`requireAgent` 校验实际 token 行和目标项目代次；每个 token 只在其签发项目使用；`pending` 仍可访问 `/agent/me`。
 - Agent 卡片的项目访问统一走 `assertAgentProjectAccess`；多项目调用必须传 `project_id`。
 - **Agent 卡片权限**：可创建卡片、关闭/重开**自己创建的**卡片；不能删除，不能操作人类或其他 Agent 的卡片。所有权判定 `created_by_type='agent'` + `created_by_id=agent.id`。
+- **管理员短路**：`POST /cards/:cid/short-circuit` 仅对项目 owner（本项目）与实例 admin（实例内任意未归档项目）开放；`engage` 跳过提案直接生成合成 session/proposal/contract 并进入 `engaged`，`verify` 跳过 evidence/verifier 冲突门槛。必须带 reason，写 `card.short_circuited` 事件；普通成员 403。详见 `docs/short-circuit.md`。
 - Agent 读取 `/agent/cards`：任何 token 都只能返回其绑定项目；显式 `project_id` 指向其他项目一律 `403 CREDENTIAL_SCOPE_MISMATCH`，显式上下文仍校验 active 成员关系，增量分页使用稳定游标。
 - 对外 Agent 引用一律用 `<project_id>:<local_slug>`（scoped ref）；`resolveProjectAgentReference` 不接受 internal ID 回退。`/projects/:pid/agents` 与 `/agent/peers` 返回 scoped 公开 ID；legacy 状态端点 `/api/v1/agents/:aid/status` 已删除，启停统一走 `/api/v1/projects/:pid/agents/:aid/status`。
 - `X-Dev-Email` / `?dev_email=` 绕过仅限 `ENVIRONMENT=development`；生产必须关闭。

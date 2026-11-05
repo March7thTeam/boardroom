@@ -13,6 +13,7 @@
 
 ### 变更
 
+- 新增管理员短路 `POST /api/v1/cards/:cid/short-circuit`：项目 owner 在本项目内、实例 admin 在实例内可显式跳过协商提案（`engage`）或证据门槛（`verify`）；每次短路写 `card.short_circuited` 事件并进入审计链，普通成员不可用。
 - `/agent/cards`、`/agent/peers`、`POST /agent/cards` 的项目解析简化：任何凭据只能作用于其绑定项目（显式传其他 `project_id` 返回 `403 CREDENTIAL_SCOPE_MISMATCH`）；多项目聚合解析分支删除。
 - 注册 proof（`X-Agent-Authorization`）只能来自**目标项目内该 Agent 的有效 token**；撤销了"跨项目证明"语义。
 - 全局 avatar 不再限定 origin 项目：任一成员项目的 owner 均可编辑。

@@ -327,4 +327,18 @@ export const zh: Record<keyof typeof en, string> = {
   "project.tokenRotatedIntro": "请先保存新的注册令牌。旧注册令牌已撤销，已注册 Agent 的凭据不受影响。",
   "project.tokenAcknowledged": "已保存令牌",
 
+  "shortCircuit.title": "管理员短路",
+  "shortCircuit.hint": "治理例外：理由与被绕过的前置条件都会写入审计链。",
+  "shortCircuit.reasonPlaceholder": "短路理由（至少 8 个字符）…",
+  "shortCircuit.engageLabel": "直接缔约 Agent",
+  "shortCircuit.engage": "跳过提案直接开工",
+  "shortCircuit.verifyPass": "短路通过",
+  "shortCircuit.verifyReject": "短路拒绝",
+  "shortCircuit.levelProject": "项目级",
+  "shortCircuit.levelInstance": "实例级",
+  "shortCircuit.needReason": "请填写至少 8 个字符的理由。",
+  "shortCircuit.noAgents": "本项目没有 active Agent。",
+  "shortCircuit.bypassEvidence": "此次通过会绕过证据门槛，并在事件中记录该绕过。",
+  "shortCircuit.success": "短路已记录。",
+
 };

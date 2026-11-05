@@ -1771,6 +1771,7 @@ function BoardApp({ user }: { user: UserProfile }): React.ReactElement {
                     embedded
                     cardId={activeTabId}
                     projectId={selectedProjectId}
+                    projectRole={currentProject?.role}
                     fallbackCard={selectedCardFallback}
                     agentNameMap={agentNameMap}
                     currentUser={user}
@@ -2066,6 +2067,7 @@ function BoardApp({ user }: { user: UserProfile }): React.ReactElement {
                 embedded
                 cardId={cid}
                 projectId={selectedProjectId}
+                projectRole={currentProject?.role}
                 fallbackCard={winCard}
                 agentNameMap={agentNameMap}
                 currentUser={user}
