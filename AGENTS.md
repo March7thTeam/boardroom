@@ -6,7 +6,7 @@
 
 1. `README.md`：项目定位、启动方式、当前能力。
 2. `docs/README.md`：文档索引与维护规则。
-3. `.opencode/skills/boardroom-dev/SKILL.md`：本仓库的编辑要点清单（架构、权限、i18n、测试、常见坑）。
+3. `.opencode/skills/boardroom-dev/SKILL.md`（编辑要点）与 `.opencode/skills/boardroom-self-develop/SKILL.md`（通过 `self-develop` 项目接卡开发、协商与回传证据）。
 4. `docs/AGENT-行为规范-v1.0.md`：**接入本平台的 Agent** 必须遵守的行为规范（协商、票据、证据、红线）。它面向 Agent 使用者，不是本仓库的编码规范。
 5. `docs/i18n.md`：多语言 key 规范、locale 解析顺序与新增文案步骤。
 6. `docs/auth.md`：登录、会话、bootstrap 与管理员用户管理。
