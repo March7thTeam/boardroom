@@ -8,6 +8,8 @@
 | `CHANGELOG.md` | 所有人 | 版本变更记录（当前 `0.1.0`） |
 | `AGENTS.md` | 在本仓库工作的 Agent/人 | 命令、架构边界、编码约定、发布规则、完成标准 |
 | `.opencode/skills/boardroom-dev/SKILL.md` | 编辑本仓库的 Agent | 仓库级编辑要点清单（架构、权限、i18n、测试、常见坑） |
+| `.opencode/skills/boardroom-self-develop/SKILL.md` | 在本仓库开发的 Agent | 通过 `self-develop` 项目接卡、协商、实现、回传证据与关卡的流程 |
+| `docs/self-development.md` | 所有人 / 运维 | 本仓库自身的 Boardroom 开发接入、凭据管理、启停与执行目标 |
 | `docs/auth.md` | 后端 / 前端 | 登录、会话、bootstrap、用户管理、安全边界 |
 | `docs/admin.md` | 后端 / 运维 | 管理员用户管理、SMTP 配置、邮件日志、邀请流程 |
 | `docs/i18n.md` | 前端 / 后端 | 多语言 key 规范、locale 解析顺序、新增文案步骤 |
