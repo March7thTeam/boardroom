@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+apps/web/dist/
+*.tsbuildinfo
+
+# local dev
+.wrangler/
+.dev.vars
+.env
+.env.*
+!.dev.vars.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local logs
+*.log

@@ -1,0 +1,26 @@
+# Local development secrets. Copy to .dev.vars and replace values.
+# 32 random bytes, base64url. Rotating this invalidates all issued tokens.
+TOKEN_PEPPER=replace-with-32-random-bytes-base64url
+# Fine-grained PAT with "Actions: Read" and "Contents: Read" on allowed repos.
+GITHUB_TOKEN=
+
+# Local-only overrides (production uses wrangler.jsonc vars)
+ENVIRONMENT=development
+AUTH_MODE=session
+APP_BASE_URL=http://127.0.0.1:8787
+ADMIN_EMAILS=admin@example.com
+DEV_IDENTITY_EMAIL=admin@example.com
+
+# Production instance vars are set in the Cloudflare dashboard.
+# wrangler.jsonc sets keep_vars=true so code deploys do not overwrite them.
+
+# SMTP (optional). SMTP_HOST is enough when the provider allows the
+# authenticated account (SMTP_USER) as sender; SMTP_FROM is optional.
+# SMTP_HOST=smtp.example.com
+# SMTP_PORT=465
+# SMTP_USER=boardroom
+# SMTP_PASSWORD=
+# SMTP_FROM=Boardroom <no-reply@example.com>
+# SMTP_SECURE=on            # on | starttls | off
+# SMTP_REPLY_TO=
+# APP_BASE_URL=https://boardroom.example.com

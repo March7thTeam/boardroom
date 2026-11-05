@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "boardroom",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+  "assets": {
+    "directory": "./apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/", "/setup", "/api/*", "/agent/*", "/language/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "boardroom_local",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BOARD_DO",
+        "class_name": "BoardDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BoardDO"]
+    }
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  // Keep dashboard-managed vars across code deployments.
+  // User-specific values (APP_BASE_URL, ADMIN_EMAILS, AUTH_MODE, ENVIRONMENT)
+  // should be set in the Cloudflare dashboard, not overwritten by this file.
+  "keep_vars": true,
+  "vars": {
+    "ENVIRONMENT": "production",
+    "AUTH_MODE": "session"
+  }
+}
