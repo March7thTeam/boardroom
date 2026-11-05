@@ -31,6 +31,24 @@ npm run smoke         # 需要 dev:api 已启动
 npm run verify-audit -- <project_id>
 ```
 
+## 分支与合并（严格，feat → dev → main）
+
+仅存在两条长期分支，任何人（包括 AI 协作者）不得直接向它们提交：
+
+| 分支 | 用途 | 写入方式 |
+|---|---|---|
+| `dev` | 集成/开发主线 | 仅接受来自 `feat/*` 等工作分支的 PR |
+| `main` | 稳定发布线 | 仅接受来自 `dev` 的发布 PR |
+
+流程规则：
+
+1. **一切工作先切分支**：从最新 `dev` 切出 `feat/<topic>`（修复用 `fix/<topic>`，文档用 `docs/<topic>`），提交全部落在工作分支上；一个分支聚焦一件事。
+2. **进入 dev 要开 PR**：工作分支 → `dev` 的 PR 必须满足完成标准（typecheck/test/smoke），CI 绿后才能合并；**合并前必须等待 maintainer 审批（≥1 approve）**，没有审批的 PR 一律不得合入。未获批准就合并是违规操作。
+3. **进入 main 要走发布 PR**：`dev` → `main` 的发布 PR 必须满足：CI 绿、`CHANGELOG.md` 已更新、审批通过；**同样要求等待审批**。
+4. 合并顺序永远只能 **feat → dev → main**；禁止 `feat` 直接进 `main`，禁止从 `main` 往回 `dev` 的绕行 merge。
+5. 并行多任务用 worktree 或多个工作分支，避免在 `dev` 上直接叠加未评审提交。
+6. 分支保护建议由仓库管理员在 GitHub 上配置：`dev`/`main` 均开启 required pull request reviews（≥1）与 required status checks；远程推送规则以保护分支设置为准（`--force` 只允许在破坏性历史重建时，且需 owner 明确指示）。
+
 ## 架构边界（不要越界）
 
 | 允许 | 禁止 |

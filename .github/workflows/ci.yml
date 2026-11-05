@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   # Stacked PRs also need automatic checks before they target main.
   pull_request:
   workflow_dispatch:

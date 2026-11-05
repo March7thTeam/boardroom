@@ -26,6 +26,7 @@
 3. **权限/身份变更**：更新 `docs/auth.md`；Agent 卡片权限同时更新 `docs/AGENT-行为规范-v1.0.md`。
 4. **多语言变更**：`src/i18n/en.ts` 加 key，`zh.ts` 同步；前端同理。
 5. **发布状态**：当前版本 `0.1.0`（beta）；自 beta 起不要原地升级 alpha 数据——所有 alpha 迁移已合并为 `0001_init.sql`，只支持全新建库。
+6. **分支与合并**：严格遵守 AGENTS.md 的「分支与合并（严格，feat → dev → main）」——一切工作从 `dev` 切出分支，`feat → dev` 与 `dev → main` 的 PR 都必须**等待审批**后才能合并。
 
 ## 设计文档
 
