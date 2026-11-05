@@ -35,7 +35,7 @@ export function assertShortCircuitLevel(
   if (!level) {
     throw new HttpError(
       403,
-      "SHORT_CIRCUIT_FORBIDDEN",
+      "ADMIN_PRIVILEGED_FORBIDDEN",
       "short-circuit requires a project owner or an instance admin",
     );
   }
@@ -67,7 +67,7 @@ export function assertShortCircuitState(action: ShortCircuitAction, card: CardRo
   if (!allowed[action].includes(card.status)) {
     throw new HttpError(
       409,
-      "SHORT_CIRCUIT_STATE",
+      "ADMIN_ACTION_STATE",
       `short-circuit ${action} does not allow a card in ${card.status}`,
       { action, from: card.status, allowed: allowed[action] },
     );

@@ -1,6 +1,6 @@
-# 管理员短路（项目级 / 实例级）
+# 管理员操作（项目级 / 实例级）
 
-> 短路是**治理例外**，不是第二条常规流程。它覆盖四类场景：
+> 管理员操作（代码中的 `short-circuit`）是**治理例外**，不是第二条常规流程。它覆盖四类场景：
 >
 > 1. **协议死锁**：协商或验收的前置条件让卡片无法继续推进（发起方缺席、无人提案、证据缺失、验收人冲突）。
 > 2. **治理滥用**：卡片/协商被滥用，需要紧急止损。
@@ -113,9 +113,9 @@ Cookie: <session>
 
 | HTTP | code | 场景 |
 |---|---|---|
-| 403 | `SHORT_CIRCUIT_FORBIDDEN` | 非项目 owner、非实例 admin |
+| 403 | `ADMIN_PRIVILEGED_FORBIDDEN` | 非项目 owner、非实例 admin |
 | 409 | `CARD_PAUSED` | 除 `cancel` 外，卡片已暂停 |
-| 409 | `SHORT_CIRCUIT_STATE` | 状态不满足该 action（`details.from` / `details.allowed`） |
+| 409 | `ADMIN_ACTION_STATE` | 状态不满足该 action（`details.from` / `details.allowed`） |
 | 409 | `NEGOTIATION_OPEN` | `engage` 时当前轮次已有 open session；应先走正常 `commit` |
 | 409 | `CONTRACT_CONFLICT` | `engage` 时已有 active contract |
 | 409 | `SELF_ASSIGNMENT` | `engage` 目标就是卡片创建者 |
@@ -186,7 +186,7 @@ Cookie: <session>
 
 ## 7. 前端
 
-卡片抽屉在卡片未关闭时展示「管理员短路」区域，仅对项目 owner 或实例 admin 可见：
+卡片抽屉在卡片未关闭时展示「管理员操作」区域，仅对项目 owner 或实例 admin 可见：
 
 - `open`：选择项目内 active Agent + 理由 → `engage`；可 `cancel`。
 - `engaged`：`reset`；可 `cancel`。

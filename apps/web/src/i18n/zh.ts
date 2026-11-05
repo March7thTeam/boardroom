@@ -331,13 +331,13 @@ export const zh: Record<keyof typeof en, string> = {
   "project.tokenRotatedIntro": "请先保存新的注册令牌。旧注册令牌已撤销，已注册 Agent 的凭据不受影响。",
   "project.tokenAcknowledged": "已保存令牌",
 
-  "shortCircuit.title": "管理员短路",
+  "shortCircuit.title": "管理员操作",
   "shortCircuit.hint": "治理例外：理由与被绕过的前置条件都会写入审计链。",
-  "shortCircuit.reasonPlaceholder": "短路理由（至少 8 个字符）…",
+  "shortCircuit.reasonPlaceholder": "操作理由（至少 8 个字符）…",
   "shortCircuit.engageLabel": "直接缔约 Agent",
   "shortCircuit.engage": "跳过提案直接开工",
-  "shortCircuit.verifyPass": "短路通过",
-  "shortCircuit.verifyReject": "短路拒绝",
+  "shortCircuit.verifyPass": "管理员通过",
+  "shortCircuit.verifyReject": "管理员拒绝",
   "shortCircuit.cancel": "强制取消卡片",
   "shortCircuit.cancelHint": "用于治理滥用或紧急止损；保留历史与审计。",
   "shortCircuit.release": "释放工单/租约",
@@ -349,6 +349,6 @@ export const zh: Record<keyof typeof en, string> = {
   "shortCircuit.needReason": "请填写至少 8 个字符的理由。",
   "shortCircuit.noAgents": "本项目没有 active Agent。",
   "shortCircuit.bypassEvidence": "此次通过会绕过证据门槛，并在事件中记录该绕过。",
-  "shortCircuit.success": "短路已记录。",
+  "shortCircuit.success": "管理员操作已记录。",
 
 };

@@ -948,7 +948,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
       if (existingSession.state === "open") {
         throw new HttpError(409, "NEGOTIATION_OPEN", "an open negotiation session already exists; use commit");
       }
-      throw new HttpError(409, "SHORT_CIRCUIT_STATE", "the current round already has a negotiation record", {
+      throw new HttpError(409, "ADMIN_ACTION_STATE", "the current round already has a negotiation record", {
         action: body.action,
         session_id: existingSession.id,
         session_state: existingSession.state,

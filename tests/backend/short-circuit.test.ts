@@ -338,7 +338,7 @@ describe("admin short-circuit", () => {
       MEMBER_EMAIL,
     );
     expect(response.status).toBe(403);
-    expect(response.body.error?.code).toBe("SHORT_CIRCUIT_FORBIDDEN");
+    expect(response.body.error?.code).toBe("ADMIN_PRIVILEGED_FORBIDDEN");
   });
 
   it("lets an instance admin act on a project without membership", async () => {
@@ -472,7 +472,7 @@ describe("admin short-circuit", () => {
       verdict: "pass",
     });
     expect(wrongState.status).toBe(409);
-    expect(wrongState.body.error?.code).toBe("SHORT_CIRCUIT_STATE");
+    expect(wrongState.body.error?.code).toBe("ADMIN_ACTION_STATE");
   });
 
   it("deduplicates a repeated message_id without creating a second contract", async () => {
@@ -631,14 +631,14 @@ describe("admin short-circuit", () => {
       reason: "open cards have no ticket to release",
     });
     expect(release.status).toBe(409);
-    expect(release.body.error?.code).toBe("SHORT_CIRCUIT_STATE");
+    expect(release.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
     const reset = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
       action: "reset",
       reason: "open cards are already open",
     });
     expect(reset.status).toBe(409);
-    expect(reset.body.error?.code).toBe("SHORT_CIRCUIT_STATE");
+    expect(reset.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
     const memberCancel = await f.call(
       `/api/v1/cards/${cid}/short-circuit`,
@@ -646,6 +646,6 @@ describe("admin short-circuit", () => {
       MEMBER_EMAIL,
     );
     expect(memberCancel.status).toBe(403);
-    expect(memberCancel.body.error?.code).toBe("SHORT_CIRCUIT_FORBIDDEN");
+    expect(memberCancel.body.error?.code).toBe("ADMIN_PRIVILEGED_FORBIDDEN");
   });
 });

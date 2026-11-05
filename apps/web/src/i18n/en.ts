@@ -330,13 +330,13 @@ export const en = {
   "project.tokenRotatedIntro": "Save the new enrollment token before continuing. Previous enrollment tokens are revoked; existing Agent credentials are unchanged.",
   "project.tokenAcknowledged": "Token saved",
 
-  "shortCircuit.title": "Admin short-circuit",
+  "shortCircuit.title": "Admin actions",
   "shortCircuit.hint": "Governance exception. The reason and every bypassed gate are written to the audit chain.",
-  "shortCircuit.reasonPlaceholder": "Short-circuit reason (at least 8 characters)…",
+  "shortCircuit.reasonPlaceholder": "Action reason (at least 8 characters)…",
   "shortCircuit.engageLabel": "Direct engagement agent",
   "shortCircuit.engage": "Engage without proposal",
-  "shortCircuit.verifyPass": "Short-circuit pass",
-  "shortCircuit.verifyReject": "Short-circuit reject",
+  "shortCircuit.verifyPass": "Admin pass",
+  "shortCircuit.verifyReject": "Admin reject",
   "shortCircuit.cancel": "Cancel card",
   "shortCircuit.cancelHint": "Emergency stop for abuse or a stuck card; history and audit are preserved.",
   "shortCircuit.release": "Release ticket/lease",
@@ -348,6 +348,6 @@ export const en = {
   "shortCircuit.needReason": "Enter a reason of at least 8 characters.",
   "shortCircuit.noAgents": "No active Agent in this project.",
   "shortCircuit.bypassEvidence": "This pass bypasses the evidence gate and records the bypass.",
-  "shortCircuit.success": "Short-circuit recorded.",
+  "shortCircuit.success": "Admin action recorded.",
 
 } as const;

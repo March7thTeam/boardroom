@@ -55,11 +55,11 @@ describe("short-circuit state gate", () => {
   it("requires open for engage and review for verify", () => {
     expect(() => assertShortCircuitState("engage", card())).not.toThrow();
     expect(() => assertShortCircuitState("engage", card({ status: "review" }))).toThrow(
-      expect.objectContaining({ code: "SHORT_CIRCUIT_STATE" }),
+      expect.objectContaining({ code: "ADMIN_ACTION_STATE" }),
     );
     expect(() => assertShortCircuitState("verify", card({ status: "review" }))).not.toThrow();
     expect(() => assertShortCircuitState("verify", card())).toThrow(
-      expect.objectContaining({ code: "SHORT_CIRCUIT_STATE" }),
+      expect.objectContaining({ code: "ADMIN_ACTION_STATE" }),
     );
   });
 
