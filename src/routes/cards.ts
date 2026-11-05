@@ -16,6 +16,7 @@ import {
 import { resolveProjectAgentReference } from "../domain/agent-projects";
 import { verifierConflict } from "../domain/verification";
 import { HttpError } from "../lib/http-error";
+import { sha256Hex } from "../lib/crypto";
 import { commitAndPublish, findExistingEvent } from "../lib/event-store";
 import { parseBody, parseIfMatch, parseLimit } from "../lib/http";
 import { newId } from "../lib/ids";
@@ -514,7 +515,36 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   if (card.status !== "review") {
-    throw new HttpError(409, "CARD_NOT_IN_REVIEW", "verdict requires a card in review");
+    const project = await c.env.DB.prepare(
+      "SELECT verification_mode FROM projects WHERE id = ?1",
+    )
+      .bind(card.project_id)
+      .first<{ verification_mode: "human" | "rule" }>();
+    if (card.status !== "engaged" || project?.verification_mode !== "human") {
+      throw new HttpError(409, "CARD_NOT_IN_REVIEW", "verdict requires a card in review");
+    }
+  }
+
+  // Human mode may close an engaged contract directly: there is no execution
+  // target to produce a run/ticket, so a human attestation is the evidence.
+  const humanAttestation = card.status === "engaged";
+  const attestationNote = (body.reasons ?? [])
+    .map((reason) => reason.message.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (humanAttestation && attestationNote.length < 8) {
+    throw new HttpError(
+      400,
+      "ATTESTATION_REQUIRED",
+      "human acceptance requires a note of at least 8 characters",
+    );
+  }
+  if (humanAttestation && body.verdict === "needs_more") {
+    throw new HttpError(
+      409,
+      "ILLEGAL_TRANSITION",
+      "needs_more is only available for cards in review; use reopen or intervene",
+    );
   }
 
   const contract = await c.env.DB.prepare(
@@ -526,7 +556,7 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
     throw new HttpError(409, "VERIFIER_CONFLICT", "the proposer cannot verify this card");
   }
 
-  if (body.verdict === "pass") {
+  if (body.verdict === "pass" && !humanAttestation) {
     const evidence = await c.env.DB.prepare(
       "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
     )
@@ -538,14 +568,26 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   const now = nowIso();
+  const attestationId = humanAttestation ? newId("ev") : null;
+  const attestationHash = humanAttestation
+    ? await sha256Hex(`${card.id}\n${user.id}\n${now}\n${attestationNote}`)
+    : null;
+  const attestationDigest = attestationHash ? `sha256:${attestationHash}` : null;
   const reasonsJson = JSON.stringify({
     verdict: body.verdict,
     reasons: body.reasons ?? [],
     score: body.score ?? null,
     rule_version: body.rule_version ?? null,
-    self_reported: true,
+    self_reported: !humanAttestation,
     verified_by: user.id,
     verified_at: now,
+    ...(humanAttestation
+      ? {
+          human_attested: true,
+          verification_mode: "human",
+          attestation_id: attestationId,
+        }
+      : {}),
   });
 
   if (body.verdict === "needs_more") {
@@ -574,28 +616,65 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   const outcome = body.verdict === "pass" ? "done" : "rejected";
-  assertTransition("verdict", "review", outcome);
+  assertTransition(humanAttestation ? "attest" : "verdict", card.status, outcome);
   const cardWrite = c.env.DB.prepare(
     `UPDATE cards SET status = 'closed', outcome = ?1, verifier_id = ?2,
-            verdict_reasons_json = ?3, version = version + 1, updated_at = ?4
-      WHERE id = ?5 AND version = ?6 AND status = 'review'`,
+            verdict_reasons_json = ?3, evidence_hash = COALESCE(?4, evidence_hash),
+            version = version + 1, updated_at = ?5
+      WHERE id = ?6 AND version = ?7 AND status = ?8`,
   )
-    .bind(outcome, user.id, reasonsJson, now, card.id, card.version);
-  const related = contract ? [guardedCardWrite(c.env.DB, card,
-    "UPDATE contracts SET state = ?1, closed_at = ?2 WHERE id = ?3 AND state = 'active' AND /* current_card */",
-    [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id])] : [];
+    .bind(outcome, user.id, reasonsJson, attestationDigest, now, card.id, card.version, card.status);
+  const attestationStatement = humanAttestation
+    ? guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO evidence
+           (id, card_id, kind, sha256, size_bytes, media_type, summary, produced_by, created_at)
+         SELECT ?1, ?2, 'attestation', ?3, ?4, 'text/plain', ?5, ?6, ?7 WHERE /* current_card */`,
+        [
+          attestationId!,
+          card.id,
+          attestationHash!,
+          new TextEncoder().encode(attestationNote).length,
+          attestationNote.slice(0, 500),
+          user.id,
+          now,
+        ],
+      )
+    : null;
+  const related = [
+    ...(attestationStatement ? [attestationStatement] : []),
+    ...(contract
+      ? [
+          guardedCardWrite(
+            c.env.DB,
+            card,
+            "UPDATE contracts SET state = ?1, closed_at = ?2 WHERE id = ?3 AND state = 'active' AND /* current_card */",
+            [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id],
+          ),
+        ]
+      : []),
+  ];
   const { seq, eventId, eventPending, card: updated } = await appendCardEvent(
     c,
     card,
     "card.verdict",
     {
       verdict: body.verdict,
-      from: "review",
+      from: card.status,
       to: "closed",
       outcome,
       reasons: body.reasons ?? [],
       score: body.score ?? null,
       rule_version: body.rule_version ?? null,
+      ...(humanAttestation
+        ? {
+            human_attested: true,
+            verification_mode: "human",
+            attestation_id: attestationId,
+            evidence_hash: attestationDigest,
+          }
+        : {}),
     },
     body.message_id, [...related, cardWrite],
   );

@@ -67,6 +67,7 @@ export const zh: Record<keyof typeof en, string> = {
   "error.LEASE_CONFLICT": "租约获取失败",
   "error.VERIFIER_CONFLICT": "提案方不能验收该卡片",
   "error.EVIDENCE_REQUIRED": "通过验收至少需要一条证据",
+  "error.ATTESTATION_REQUIRED": "人工验收需要至少 8 个字符的说明",
   "error.SHORT_CIRCUIT_FORBIDDEN": "短路需要项目所有者或实例管理员权限",
   "error.SHORT_CIRCUIT_STATE": "当前卡片状态不允许该短路动作",
   "error.NEGOTIATION_OPEN": "当前轮次已有进行中的协商，请直接接受提案",

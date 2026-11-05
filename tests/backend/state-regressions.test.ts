@@ -238,6 +238,82 @@ describe("card lifecycle and negotiation consistency", () => {
   });
 });
 
+describe("human acceptance of engaged contracts", () => {
+  const note = "local typecheck and full test suite pass";
+
+  it("closes an engaged human-mode card with an attestation and no run", async () => {
+    const f = await fixture(); const cid = await f.engaged();
+    const response = await f.call(`/api/v1/cards/${cid}/verify`, {
+      message_id: "human-attest-pass",
+      verdict: "pass",
+      reasons: [{ message: note, pass: true }],
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.card?.status).toBe("closed");
+    expect(response.body.card?.outcome).toBe("done");
+    const evidence = f.db.sqlite.prepare(
+      "SELECT kind,sha256,summary,produced_by FROM evidence WHERE card_id=?",
+    ).all(cid) as Array<{ kind: string; sha256: string; summary: string; produced_by: string }>;
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].kind).toBe("attestation");
+    expect(evidence[0].sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(evidence[0].produced_by).toBe("u");
+    expect(f.card(cid).evidence_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(f.db.sqlite.prepare("SELECT state FROM contracts WHERE card_id=?").get(cid)?.state).toBe("fulfilled");
+    const event = f.events.find((item) => item.eventType === "card.verdict");
+    expect((event?.payload as { from?: string; human_attested?: boolean }).from).toBe("engaged");
+    expect((event?.payload as { human_attested?: boolean }).human_attested).toBe(true);
+  });
+
+  it("requires a written attestation note before closing", async () => {
+    const f = await fixture(); const cid = await f.engaged();
+    const response = await f.call(`/api/v1/cards/${cid}/verify`, {
+      message_id: "human-attest-no-note",
+      verdict: "pass",
+    });
+    expect(response.status).toBe(400);
+    expect(response.body.error?.code).toBe("ATTESTATION_REQUIRED");
+    expect(f.card(cid).status).toBe("engaged");
+    expect(f.db.sqlite.prepare("SELECT COUNT(*) n FROM evidence WHERE card_id=?").get(cid)?.n).toBe(0);
+  });
+
+  it("rejects an engaged contract and marks it breached", async () => {
+    const f = await fixture(); const cid = await f.engaged();
+    const response = await f.call(`/api/v1/cards/${cid}/verify`, {
+      message_id: "human-attest-reject",
+      verdict: "reject",
+      reasons: [{ message: "acceptance criteria were not met", pass: false }],
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.card?.outcome).toBe("rejected");
+    expect(f.db.sqlite.prepare("SELECT state FROM contracts WHERE card_id=?").get(cid)?.state).toBe("breached");
+  });
+
+  it("does not allow direct attestation in rule mode", async () => {
+    const f = await fixture();
+    f.db.sqlite.exec("UPDATE projects SET verification_mode='rule' WHERE id='prj_01ARZ3NDEKTSV4RRFFQ69G5FAV'");
+    const cid = await f.engaged();
+    const response = await f.call(`/api/v1/cards/${cid}/verify`, {
+      message_id: "rule-mode-attest",
+      verdict: "pass",
+      reasons: [{ message: note, pass: true }],
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.error?.code).toBe("CARD_NOT_IN_REVIEW");
+  });
+
+  it("rejects needs_more from an engaged card", async () => {
+    const f = await fixture(); const cid = await f.engaged();
+    const response = await f.call(`/api/v1/cards/${cid}/verify`, {
+      message_id: "human-attest-needs-more",
+      verdict: "needs_more",
+      reasons: [{ message: note, pass: false }],
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.error?.code).toBe("ILLEGAL_TRANSITION");
+  });
+});
+
 describe("run evidence and concurrent interventions", () => {
   it("replays a published successful ticket receipt without verifying or applying it again", async () => {
     const f = await fixture(); const { cid, ticket } = await f.running();

@@ -17,6 +17,7 @@ type CardDrawerProps = {
   cardId: string;
   projectId: string;
   projectRole?: ProjectRole;
+  verificationMode?: "human" | "rule";
   fallbackCard?: Card | null;
   agentNameMap: ReadonlyMap<string, string>;
   currentUser: UserProfile;
@@ -37,6 +38,7 @@ export function CardDrawer({
   cardId,
   projectId,
   projectRole,
+  verificationMode,
   fallbackCard,
   agentNameMap,
   currentUser,
@@ -132,10 +134,12 @@ export function CardDrawer({
 
   const negotiation = negotiationQuery.data;
   const latestProposal = negotiation?.proposals.at(-1) ?? null;
-  // `verify pass` requires at least one evidence row server-side; with no
-  // declared artifact the button can only return 409 EVIDENCE_REQUIRED.
+  // `verify pass` in review requires at least one evidence row server-side.
+  // Human attestation of an engaged contract creates that row itself.
   const evidenceCount = negotiation?.evidence?.length ?? 0;
-  const passBlockedByEvidence = evidenceCount === 0;
+  const humanAttestation = card?.status === "engaged" && verificationMode === "human";
+  const passBlockedByEvidence = card?.status === "review" && evidenceCount === 0;
+  const attestationReady = verdictReason.trim().length >= 8;
   const canAcceptProposal =
     card?.status === "open" &&
     card?.created_by_type === "user" &&
@@ -973,32 +977,49 @@ export function CardDrawer({
                       </div>
                     )}
 
-                    {card.status === "review" && (
+                    {(card.status === "review" || humanAttestation) && (
                       <div className="drawer-action-dialog">
-                        <div className="dialog-title">验收</div>
+                        <div className="dialog-title">
+                          {humanAttestation ? t("card.humanAttestTitle") : "验收"}
+                        </div>
+                        {humanAttestation && (
+                          <div className="field-hint">{t("card.humanAttestHint")}</div>
+                        )}
                         <textarea
                           className="textarea"
                           rows={2}
-                          placeholder="验收意见（选填）…"
+                          placeholder={
+                            humanAttestation
+                              ? t("card.humanAttestPlaceholder")
+                              : "验收意见（选填）…"
+                          }
                           value={verdictReason}
                           onChange={(e) => setVerdictReason(e.target.value)}
                         />
+                        {humanAttestation && !attestationReady && (
+                          <div className="field-hint">{t("card.humanAttestRequired")}</div>
+                        )}
                         {passBlockedByEvidence && (
                           <div className="field-hint">{t("card.evidenceRequired")}</div>
                         )}
                         <div className="form-actions">
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            disabled={verifyMutation.isPending}
-                            onClick={() => verifyMutation.mutate("needs_more")}
-                          >
-                            要求补充
-                          </button>
+                          {!humanAttestation && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={verifyMutation.isPending}
+                              onClick={() => verifyMutation.mutate("needs_more")}
+                            >
+                              要求补充
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
-                            disabled={verifyMutation.isPending}
+                            disabled={
+                              verifyMutation.isPending ||
+                              (humanAttestation && !attestationReady)
+                            }
                             onClick={() => verifyMutation.mutate("reject")}
                           >
                             拒绝
@@ -1006,7 +1027,11 @@ export function CardDrawer({
                           <button
                             type="button"
                             className="btn btn-primary btn-sm"
-                            disabled={verifyMutation.isPending || passBlockedByEvidence}
+                            disabled={
+                              verifyMutation.isPending ||
+                              passBlockedByEvidence ||
+                              (humanAttestation && !attestationReady)
+                            }
                             title={passBlockedByEvidence ? t("card.evidenceRequired") : undefined}
                             onClick={() => verifyMutation.mutate("pass")}
                           >

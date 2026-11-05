@@ -66,6 +66,7 @@ export const en = {
   "error.LEASE_CONFLICT": "Lease could not be acquired",
   "error.VERIFIER_CONFLICT": "The party that proposed the terms cannot verify this card",
   "error.EVIDENCE_REQUIRED": "A passing verdict requires evidence",
+  "error.ATTESTATION_REQUIRED": "Human acceptance requires a note of at least 8 characters",
   "error.SHORT_CIRCUIT_FORBIDDEN": "Short-circuit requires a project owner or an instance admin",
   "error.SHORT_CIRCUIT_STATE": "Short-circuit is not allowed in the current card state",
   "error.NEGOTIATION_OPEN": "An open negotiation session already exists; accept the proposal instead",
