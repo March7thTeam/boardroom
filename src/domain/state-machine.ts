@@ -9,6 +9,7 @@ export type TransitionAction =
   | "deliver"
   | "retry"
   | "verdict"
+  | "attest"
   | "rework"
   | "reopen";
 
@@ -26,6 +27,9 @@ const RULES: Record<TransitionAction, TransitionRule> = {
   retry: { from: ["running"], to: "engaged" },
   rework: { from: ["review"], to: "engaged" },
   verdict: { from: ["review"], to: "closed", outcomes: ["done", "rejected"] },
+  // Human acceptance without an execution target: an engaged contract can be
+  // closed directly by a human verdict. Rule-mode cards never use this path.
+  attest: { from: ["engaged"], to: "closed", outcomes: ["done", "rejected"] },
   reopen: { from: ["closed"], to: "open" },
 };
 

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, Pencil, RefreshCw, RotateCcw, X } from "lucide-react";
 import { api, ApiError, safeParseCriteriaJson } from "../api";
 import { useI18n } from "../i18n";
-import type { Card, UserProfile } from "../types";
+import type { Card, ProjectRole, UserProfile } from "../types";
 import { OutcomeIcon, StatusIcon } from "./Icons";
 import {
   formatDateTime,
@@ -16,6 +16,8 @@ import {
 type CardDrawerProps = {
   cardId: string;
   projectId: string;
+  projectRole?: ProjectRole;
+  verificationMode?: "human" | "rule";
   fallbackCard?: Card | null;
   agentNameMap: ReadonlyMap<string, string>;
   currentUser: UserProfile;
@@ -35,6 +37,8 @@ function prettyJson(raw: string): string {
 export function CardDrawer({
   cardId,
   projectId,
+  projectRole,
+  verificationMode,
   fallbackCard,
   agentNameMap,
   currentUser,
@@ -76,6 +80,8 @@ export function CardDrawer({
   const [interventionReason, setInterventionReason] = useState("");
   const [redirectPriority, setRedirectPriority] = useState(50);
   const [verdictReason, setVerdictReason] = useState("");
+  const [shortCircuitReason, setShortCircuitReason] = useState("");
+  const [shortCircuitTarget, setShortCircuitTarget] = useState("");
 
   const card = detailQuery.data?.card ?? fallbackCard ?? null;
   const events = useMemo(() => {
@@ -86,6 +92,18 @@ export function CardDrawer({
   const rules = useMemo(
     () => safeParseCriteriaJson(card?.criteria_json ?? null),
     [card?.criteria_json],
+  );
+
+  const canShortCircuit = currentUser.role === "admin" || projectRole === "owner";
+  const shortCircuitReady = shortCircuitReason.trim().length >= 8;
+  const shortCircuitAgentsQuery = useQuery({
+    queryKey: ["project-agents", projectId],
+    queryFn: () => api.getProjectAgents(projectId),
+    enabled: canShortCircuit && card?.status === "open",
+  });
+  const shortCircuitAgents = useMemo(
+    () => (shortCircuitAgentsQuery.data?.agents ?? []).filter((agent) => agent.status === "active"),
+    [shortCircuitAgentsQuery.data],
   );
 
   const assigneeLabel =
@@ -116,10 +134,12 @@ export function CardDrawer({
 
   const negotiation = negotiationQuery.data;
   const latestProposal = negotiation?.proposals.at(-1) ?? null;
-  // `verify pass` requires at least one evidence row server-side; with no
-  // declared artifact the button can only return 409 EVIDENCE_REQUIRED.
+  // `verify pass` in review requires at least one evidence row server-side.
+  // Human attestation of an engaged contract creates that row itself.
   const evidenceCount = negotiation?.evidence?.length ?? 0;
-  const passBlockedByEvidence = evidenceCount === 0;
+  const humanAttestation = card?.status === "engaged" && verificationMode === "human";
+  const passBlockedByEvidence = card?.status === "review" && evidenceCount === 0;
+  const attestationReady = verdictReason.trim().length >= 8;
   const canAcceptProposal =
     card?.status === "open" &&
     card?.created_by_type === "user" &&
@@ -302,6 +322,49 @@ export function CardDrawer({
     onSuccess: (result) => {
       setInterventionReason("");
       setActionBanner({ type: result.event_pending ? "warning" : "success", message: result.event_pending ? t("common.eventPending") : "人工干预已记录。" });
+      refreshCardAndBoard();
+    },
+    onError: handleWriteError,
+  });
+
+  const shortCircuitMutation = useMutation({
+    mutationFn: (input: {
+      action: "engage" | "verify" | "cancel" | "release" | "reset";
+      verdict?: "pass" | "reject";
+    }) => {
+      const reason = shortCircuitReason.trim();
+      if (reason.length < 8) throw new Error(t("shortCircuit.needReason"));
+      if (input.action === "engage") {
+        return api.shortCircuitCard(cardId, {
+          action: "engage",
+          message_id: crypto.randomUUID(),
+          reason,
+          ...(shortCircuitTarget ? { assignee_agent_id: shortCircuitTarget } : {}),
+        });
+      }
+      if (input.action === "verify") {
+        return api.shortCircuitCard(cardId, {
+          action: "verify",
+          message_id: crypto.randomUUID(),
+          reason,
+          verdict: input.verdict ?? "pass",
+          reasons: verdictReason.trim()
+            ? [{ message: verdictReason.trim(), pass: input.verdict === "pass" }]
+            : undefined,
+        });
+      }
+      return api.shortCircuitCard(cardId, {
+        action: input.action,
+        message_id: crypto.randomUUID(),
+        reason,
+      });
+    },
+    onSuccess: (result) => {
+      setShortCircuitReason("");
+      setActionBanner({
+        type: result.event_pending ? "warning" : "success",
+        message: result.event_pending ? t("common.eventPending") : t("shortCircuit.success"),
+      });
       refreshCardAndBoard();
     },
     onError: handleWriteError,
@@ -924,32 +987,49 @@ export function CardDrawer({
                       </div>
                     )}
 
-                    {card.status === "review" && (
+                    {(card.status === "review" || humanAttestation) && (
                       <div className="drawer-action-dialog">
-                        <div className="dialog-title">验收</div>
+                        <div className="dialog-title">
+                          {humanAttestation ? t("card.humanAttestTitle") : "验收"}
+                        </div>
+                        {humanAttestation && (
+                          <div className="field-hint">{t("card.humanAttestHint")}</div>
+                        )}
                         <textarea
                           className="textarea"
                           rows={2}
-                          placeholder="验收意见（选填）…"
+                          placeholder={
+                            humanAttestation
+                              ? t("card.humanAttestPlaceholder")
+                              : "验收意见（选填）…"
+                          }
                           value={verdictReason}
                           onChange={(e) => setVerdictReason(e.target.value)}
                         />
+                        {humanAttestation && !attestationReady && (
+                          <div className="field-hint">{t("card.humanAttestRequired")}</div>
+                        )}
                         {passBlockedByEvidence && (
                           <div className="field-hint">{t("card.evidenceRequired")}</div>
                         )}
                         <div className="form-actions">
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            disabled={verifyMutation.isPending}
-                            onClick={() => verifyMutation.mutate("needs_more")}
-                          >
-                            要求补充
-                          </button>
+                          {!humanAttestation && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={verifyMutation.isPending}
+                              onClick={() => verifyMutation.mutate("needs_more")}
+                            >
+                              要求补充
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
-                            disabled={verifyMutation.isPending}
+                            disabled={
+                              verifyMutation.isPending ||
+                              (humanAttestation && !attestationReady)
+                            }
                             onClick={() => verifyMutation.mutate("reject")}
                           >
                             拒绝
@@ -957,7 +1037,11 @@ export function CardDrawer({
                           <button
                             type="button"
                             className="btn btn-primary btn-sm"
-                            disabled={verifyMutation.isPending || passBlockedByEvidence}
+                            disabled={
+                              verifyMutation.isPending ||
+                              passBlockedByEvidence ||
+                              (humanAttestation && !attestationReady)
+                            }
                             title={passBlockedByEvidence ? t("card.evidenceRequired") : undefined}
                             onClick={() => verifyMutation.mutate("pass")}
                           >
@@ -1030,6 +1114,126 @@ export function CardDrawer({
                             onClick={() => interveneMutation.mutate({ type: "reject" })}
                           >
                             驳回
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {canShortCircuit && card.status !== "closed" && (
+                      <div className="drawer-action-dialog">
+                        <div className="dialog-title">
+                          {t("shortCircuit.title")}
+                          <span className="badge badge-neutral">
+                            {currentUser.role === "admin"
+                              ? t("shortCircuit.levelInstance")
+                              : t("shortCircuit.levelProject")}
+                          </span>
+                        </div>
+                        <div className="field-hint">{t("shortCircuit.hint")}</div>
+                        <textarea
+                          className="textarea"
+                          rows={2}
+                          placeholder={t("shortCircuit.reasonPlaceholder")}
+                          value={shortCircuitReason}
+                          onChange={(e) => setShortCircuitReason(e.target.value)}
+                        />
+                        {card.status === "open" && (
+                          <select
+                            className="select"
+                            value={shortCircuitTarget}
+                            onChange={(e) => setShortCircuitTarget(e.target.value)}
+                          >
+                            <option value="">{t("shortCircuit.engageLabel")}</option>
+                            {shortCircuitAgents.map((agent) => (
+                              <option key={agent.id} value={agent.id}>
+                                {agent.resolved_name || agent.slug}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {card.status === "open" && shortCircuitAgents.length === 0 && (
+                          <div className="field-hint">{t("shortCircuit.noAgents")}</div>
+                        )}
+                        {card.status === "review" && passBlockedByEvidence && (
+                          <div className="field-hint">{t("shortCircuit.bypassEvidence")}</div>
+                        )}
+                        {card.status === "running" && (
+                          <div className="field-hint">{t("shortCircuit.releaseHint")}</div>
+                        )}
+                        {(card.status === "engaged" ||
+                          card.status === "running" ||
+                          card.status === "review") && (
+                          <div className="field-hint">{t("shortCircuit.resetHint")}</div>
+                        )}
+                        <div className="field-hint">{t("shortCircuit.cancelHint")}</div>
+                        <div className="form-actions">
+                          {card.status === "open" && (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              disabled={
+                                shortCircuitMutation.isPending ||
+                                !shortCircuitReady ||
+                                !shortCircuitTarget
+                              }
+                              onClick={() => shortCircuitMutation.mutate({ action: "engage" })}
+                            >
+                              {t("shortCircuit.engage")}
+                            </button>
+                          )}
+                          {card.status === "review" && (
+                            <>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                onClick={() =>
+                                  shortCircuitMutation.mutate({ action: "verify", verdict: "reject" })
+                                }
+                              >
+                                {t("shortCircuit.verifyReject")}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                onClick={() =>
+                                  shortCircuitMutation.mutate({ action: "verify", verdict: "pass" })
+                                }
+                              >
+                                {t("shortCircuit.verifyPass")}
+                              </button>
+                            </>
+                          )}
+                          {card.status === "running" && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                              onClick={() => shortCircuitMutation.mutate({ action: "release" })}
+                            >
+                              {t("shortCircuit.release")}
+                            </button>
+                          )}
+                          {(card.status === "engaged" ||
+                            card.status === "running" ||
+                            card.status === "review") && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                              onClick={() => shortCircuitMutation.mutate({ action: "reset" })}
+                            >
+                              {t("shortCircuit.reset")}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                            onClick={() => shortCircuitMutation.mutate({ action: "cancel" })}
+                          >
+                            {t("shortCircuit.cancel")}
                           </button>
                         </div>
                       </div>

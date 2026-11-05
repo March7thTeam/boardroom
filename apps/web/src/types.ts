@@ -5,6 +5,7 @@ export type ProjectSummary = {
   slug: string;
   name: string;
   role: ProjectRole;
+  verification_mode?: "human" | "rule";
   /** `admin`: reached as an instance admin without project membership (#5). */
   access?: "member" | "admin";
   archived_at?: string | null;

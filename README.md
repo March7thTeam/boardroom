@@ -99,7 +99,8 @@ npm run dev:web   # vite，端口 5173，/api 代理到 8787
 - `GET/POST /projects/:pid/cards`
 - `GET/PATCH /cards/:cid`
 - `POST /cards/:cid/commit`（仅接受当前轮次的有效最新提案；Agent 建卡由项目 owner 代收，审计记 `on_behalf_of`）
-- `POST /cards/:cid/verify`（人工/规则验收；仅提案方不可验收，建卡人可验收自己接受的提案）
+- `POST /cards/:cid/verify`（人工/规则验收；human 模式下 `engaged` 卡片可直接人工验收，验收说明写成 `attestation` 证据；rule 模式必须 `review`）
+- `POST /cards/:cid/short-circuit`（项目 owner / 实例 admin 管理员操作：`engage` 跳过提案、`verify` 跳过证据门槛、`cancel` 紧急止损、`release` 释放卡死工单、`reset` 重置异常轮次；均写 `card.short_circuited` 审计事件）
 - `POST /cards/:cid/intervene`（reject / redirect / takeover / pause / resume）
 - `POST /cards/:cid/close`、`POST /cards/:cid/reopen`（同步结束旧合同、协商、票据与租约；重开进入新轮次）
 - `GET /cards/:cid/negotiation`（session / proposals / contract / attempts / evidence）
