@@ -299,3 +299,22 @@ describe('reenabling disabled agents preserves project capacity',()=>{
   expect(f.db.sqlite.prepare('SELECT status FROM agent_projects WHERE agent_id=? AND project_id=?').get(internalAgentId(f,PROJECT_A),PROJECT_A)?.status).toBe('disabled');
  });
 });
+
+describe('project agent listing',()=>{
+ it('reads membership status from agent_projects, never the removed global status column',async()=>{
+  const f=await seeded(); f.env.ENVIRONMENT='development'; f.env.ADMIN_EMAILS='owner@example.test';
+  const headers={'X-Dev-Email':'owner@example.test'};
+  const path=`/api/v1/projects/${PROJECT_A}/agents`;
+  const empty=await f.call(path,undefined,undefined,headers);
+  expect(empty.status).toBe(200); expect(await empty.json()).toEqual({agents:[]});
+  expect((await register(f,f.enrollmentA)).response.status).toBe(200);
+  const listed=await f.call(path,undefined,undefined,headers);
+  expect(listed.status).toBe(200);
+  const body=await listed.json() as {agents:Array<Record<string,unknown>>};
+  expect(body.agents).toHaveLength(1);
+  expect(body.agents[0]).toMatchObject({
+    id:`${PROJECT_A}:bot`,slug:'bot',status:'pending',harness:'codex',harness_version:'1',
+    max_concurrency:1,project_count:1,resolved_name:'bot',
+  });
+ });
+});
