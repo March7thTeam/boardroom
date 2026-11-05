@@ -182,6 +182,14 @@ npm run verify-audit -- <project_id>
 - `wrangler.jsonc` 设置了 `"keep_vars": true`：`APP_BASE_URL`、`ADMIN_EMAILS`、`AUTH_MODE`、`ENVIRONMENT` 等实例变量应在 Cloudflare Dashboard 配置，代码更新不会覆盖；Secrets（`TOKEN_PEPPER`、`GITHUB_TOKEN`、`SMTP_*`）本身不会被 deploy 覆盖。
 - `wrangler.jsonc` 的 `d1_databases` 用 `database_name: boardroom_local` 按名自动绑定（不写死 `database_id`），部署时在该账号下解析对应 D1 库；确保生产账号已创建同名库 `boardroom_local`。
 
+### Cloudflare Workers 预览
+
+Workers Builds 的非生产分支使用 `npx wrangler preview`；`wrangler.jsonc` 必须保留 `previews` 区块。静态资源、兼容设置和 Durable Object migration 仍放在顶层；预览的 `BOARD_DO` 绑定在 `previews` 中声明，Cloudflare 会为每个预览创建独立的命名空间与存储。
+
+预览不继承生产变量、密钥或 D1 绑定。首次使用前，在 Worker 的 Settings → Previews Base 中绑定名为 `DB` 的**独立测试数据库**，应用本分支 `migrations/` 中的迁移，并设置独立的 `TOKEN_PEPPER` 密钥；不要绑定生产数据库或复用生产密钥。D1 迁移应使用单独的 Wrangler 配置，其顶层 `d1_databases` 指向该测试数据库，再运行 `npx wrangler d1 migrations apply DB --remote --config <预览迁移配置>`。如需预览邮件功能，在 Previews Base 单独配置测试 SMTP；`APP_BASE_URL` 应指向预览地址。
+
+预览继续使用 `ENVIRONMENT=production` 与 `AUTH_MODE=session`，保持会话鉴权并关闭开发身份绕过。构建成功只表示预览代码已发布；完成上述资源配置后，再检查 `/api/v1/setup/status` 与登录、建卡等操作。配置方式见 [Cloudflare Previews 文档](https://developers.cloudflare.com/workers/previews/configuration/)。
+
 ## 已知限制（S2 之后）
 
 - SSE 长连接无法像 WebSocket 一样休眠，MVP 的少量看板连接可接受。
