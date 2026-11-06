@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/Yang-qwq/boardroom/actions/workflows/ci.yml/badge.svg)](https://github.com/Yang-qwq/boardroom/actions/workflows/ci.yml)
 
-**0.1.0**（beta · S0 + S1 + S2 + 多项目/归档）：登录/会话、项目、Agent 项目化身份与多项目成员、卡片、5 状态机、协商与软合同、执行票据与 GitHub Actions 校验、验收与人工干预、项目归档/恢复/永久删除、事件序列、SSE 实时看板、审计哈希链。
+**0.2.0**（beta · S0 + S1 + S2 + 多项目/归档）：登录/会话、项目、Agent 项目化身份与多项目成员、卡片、5 状态机、协商与软合同、执行票据与 GitHub Actions 校验、验收与人工干预、项目归档/恢复/永久删除、事件序列、SSE 实时看板、审计哈希链。
 
 平台定位：**不执行任务的协商与证据账本**。Agent 询价/提案/承诺/交付证据，人类观察/干预/验收；真实执行在外部 CI。平台不 clone、不镜像、不缓存仓库内容。
 
 ## 协作者入口
 
 - `docs/README.md`：文档索引与维护规则。
-- `CHANGELOG.md`：版本变更记录（当前 `0.1.0`）。
+- `CHANGELOG.md`：版本变更记录（当前 `0.2.0`）。
 - `AGENTS.md`：在本仓库内编码的 AI/人类协作者规范（命令、边界、发布规则）。
 - `.opencode/skills/boardroom-dev/SKILL.md`：仓库级编辑要点清单（架构、权限、i18n、测试、常见坑）。
 - `docs/AGENT-行为规范-v1.0.md`：接入本平台的 Agent 必须遵守的协商、票据、证据与红线规范。
@@ -171,9 +171,9 @@ node scripts/smoke-solo-self-deal.mjs
 npm run verify-audit -- <project_id>
 ```
 
-## 发布与迁移（0.1.0）
+## 发布与迁移（0.2.0）
 
-- **当前版本**：`0.1.0`（beta）。**从 alpha（≤0.5.0-alapa 实例）没有原地升级路径**：0001–0010 已合并为单一 `migrations/0001_init.sql`，升级必须全新建库并重新注册。
+- **当前版本**：`0.2.0`（beta）。**从 alpha（≤0.5.0-alapa 实例）没有原地升级路径**：0001–0010 已合并为单一 `migrations/0001_init.sql`，升级必须全新建库并重新注册。
 - 数据库以 `migrations/0001_init.sql` 为起点；后续改表重新新增 `000N_*.sql`，用 `npm run db:migrate` 应用，**不要修改已发布的迁移**。
 - 发布前使用的 `db/drop.sql`、`scripts/db-reset.mjs`、`kanban-a2a-devspec/` 已删除；`db:reset` 脚本已从 `package.json` 移除。
 - `db/schema.sql` 保留为当前 schema 快照；迁移以 `migrations/` 为准。

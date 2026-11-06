@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0（beta）
+
+### 破坏性变更（Breaking）
+
+- **管理员操作命名统一**：接口统一为 `POST /api/v1/cards/:cid/admin-action`，事件统一为 `card.admin_action`，响应与合同字段统一为 `admin_action`；被跳过的前置门槛字段改为 `skipped_gates`，轮次超限标记改为 `round_limit_skipped`。不保留旧命名别名；0.1.0 为未上线预发布版本，开发期数据库直接重建，不提供数据迁移。
+
+### 变更
+
+- 新增管理员操作 `POST /api/v1/cards/:cid/admin-action`：项目 owner 在本项目内、实例 admin 在实例内可显式执行 `engage`（跳过协商提案）、`verify`（跳过证据门槛）、`cancel`（治理滥用/紧急止损）、`release`（释放卡死的 ticket/lease）、`reset`（平台 bug 重置轮次）；每次操作写 `card.admin_action` 事件与 `skipped_gates` 并进入审计链，普通成员不可用。
+- 新增项目级管理员角色 `project_members.role = 'admin'`：owner 可在「项目参与者」面板通过「修改权限」下拉授予/撤销；项目管理员可使用管理员操作，但不能管理成员或转让所有权。项目角色现为 `owner` / `admin` / `member`，新增迁移 `0002_project_admin_role.sql`。
+- 修复 human 模式无执行目标时无法验收的问题：`POST /api/v1/cards/:cid/verify` 现在允许 `engaged` 卡片直接 `pass`/`reject`，必须带 ≥8 字符验收说明；服务端写入 `kind='attestation'` 证据并把合同置为 `fulfilled`/`breached`，事件记录 `from='engaged'`、`human_attested=true`。rule 模式仍只接受 `review`。
+- 版本号升级为 `0.2.0`（beta）。
+
 ## 0.1.0（beta）
 
 ### 破坏性变更（Breaking）
@@ -13,8 +26,6 @@
 
 ### 变更
 
-- 修复 human 模式无执行目标时无法验收的问题：`POST /api/v1/cards/:cid/verify` 现在允许 `engaged` 卡片直接 `pass`/`reject`，必须带 ≥8 字符验收说明；服务端写入 `kind='attestation'` 证据并把合同置为 `fulfilled`/`breached`，事件记录 `from='engaged'`、`human_attested=true`。rule 模式仍只接受 `review`。
-- 新增项目级管理员角色 `project_members.role = 'admin'`：owner 可在「项目参与者」面板通过「修改权限」下拉授予/撤销；项目管理员可使用 `POST /api/v1/cards/:cid/admin-action` 的管理员操作（事件 `card.admin_action`），但不能管理成员或转让所有权。项目角色现为 `owner` / `admin` / `member`，新增迁移 `0002_project_admin_role.sql`。
 - `/agent/cards`、`/agent/peers`、`POST /agent/cards` 的项目解析简化：任何凭据只能作用于其绑定项目（显式传其他 `project_id` 返回 `403 CREDENTIAL_SCOPE_MISMATCH`）；多项目聚合解析分支删除。
 - 注册 proof（`X-Agent-Authorization`）只能来自**目标项目内该 Agent 的有效 token**；撤销了"跨项目证明"语义。
 - 全局 avatar 不再限定 origin 项目：任一成员项目的 owner 均可编辑。
