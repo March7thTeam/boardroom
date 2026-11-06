@@ -17,7 +17,7 @@
 | `docs/consistency.md` | 后端 / 运维 / 客户端 | 持久 outbox、202 回执、审计完整边界、SSE 撤权与升级回退 |
 | `docs/self-deal.md` | Agent / 后端 / 运维 | 自接规则、GLOBAL 心跳边界、原子判定与迁移 |
 | `docs/s2.md` | 后端 / 前端 / Agent 接入 | S2 协商、票据、run 校验、验收、干预与迁移说明 |
-| `docs/short-circuit.md` | 后端 / 前端 / 运维 | 项目级/实例级管理员操作：角色、动作矩阵、API、审计事件与不变量 |
+| `docs/admin-action.md` | 后端 / 前端 / 运维 | 项目级/实例级管理员操作：角色、动作矩阵、API、审计事件与不变量 |
 | `docs/projects.md` | 后端 / 前端 / 运维 | 项目生命周期、归档、恢复、永久删除与 slug 规则 |
 | `db/README.md` | 后端 / 运维 | migration 流程与 schema 快照说明 |
 | `db/schema.sql` | 后端 | 当前 schema 快照；迁移以 `migrations/` 为准 |

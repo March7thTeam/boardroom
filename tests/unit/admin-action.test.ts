@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertShortCircuitState,
+  assertAdminActionState,
   buildDirectEngageTerms,
-  resolveShortCircuitLevel,
-  verifyBypasses,
-} from "../../src/domain/short-circuit";
+  collectSkippedGates,
+  resolveAdminActionLevel,
+} from "../../src/domain/admin-action";
 import type { CardRow } from "../../src/types";
 
 function card(overrides: Partial<CardRow> = {}): CardRow {
@@ -38,43 +38,43 @@ function card(overrides: Partial<CardRow> = {}): CardRow {
   };
 }
 
-describe("short-circuit level resolution", () => {
+describe("admin action level resolution", () => {
   it("prefers an explicit project role over instance admin", () => {
-    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "owner" })).toBe("project_owner");
-    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "admin" })).toBe("project_admin");
-    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: "member" })).toBe("instance_admin");
-    expect(resolveShortCircuitLevel({ globalAdmin: true, projectRole: null })).toBe("instance_admin");
+    expect(resolveAdminActionLevel({ globalAdmin: true, projectRole: "owner" })).toBe("project_owner");
+    expect(resolveAdminActionLevel({ globalAdmin: true, projectRole: "admin" })).toBe("project_admin");
+    expect(resolveAdminActionLevel({ globalAdmin: true, projectRole: "member" })).toBe("instance_admin");
+    expect(resolveAdminActionLevel({ globalAdmin: true, projectRole: null })).toBe("instance_admin");
   });
 
   it("allows project owners and project admins only inside their project", () => {
-    expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "owner" })).toBe("project_owner");
-    expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "admin" })).toBe("project_admin");
-    expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: "member" })).toBeNull();
-    expect(resolveShortCircuitLevel({ globalAdmin: false, projectRole: null })).toBeNull();
+    expect(resolveAdminActionLevel({ globalAdmin: false, projectRole: "owner" })).toBe("project_owner");
+    expect(resolveAdminActionLevel({ globalAdmin: false, projectRole: "admin" })).toBe("project_admin");
+    expect(resolveAdminActionLevel({ globalAdmin: false, projectRole: "member" })).toBeNull();
+    expect(resolveAdminActionLevel({ globalAdmin: false, projectRole: null })).toBeNull();
   });
 });
 
-describe("short-circuit state gate", () => {
+describe("admin action state gate", () => {
   it("requires open for engage and review for verify", () => {
-    expect(() => assertShortCircuitState("engage", card())).not.toThrow();
-    expect(() => assertShortCircuitState("engage", card({ status: "review" }))).toThrow(
+    expect(() => assertAdminActionState("engage", card())).not.toThrow();
+    expect(() => assertAdminActionState("engage", card({ status: "review" }))).toThrow(
       expect.objectContaining({ code: "ADMIN_ACTION_STATE" }),
     );
-    expect(() => assertShortCircuitState("verify", card({ status: "review" }))).not.toThrow();
-    expect(() => assertShortCircuitState("verify", card())).toThrow(
+    expect(() => assertAdminActionState("verify", card({ status: "review" }))).not.toThrow();
+    expect(() => assertAdminActionState("verify", card())).toThrow(
       expect.objectContaining({ code: "ADMIN_ACTION_STATE" }),
     );
   });
 
   it("rejects any action on a paused card", () => {
-    expect(() => assertShortCircuitState("engage", card({ paused_at: "2026-01-01T00:00:00.000Z" }))).toThrow(
+    expect(() => assertAdminActionState("engage", card({ paused_at: "2026-01-01T00:00:00.000Z" }))).toThrow(
       expect.objectContaining({ code: "CARD_PAUSED" }),
     );
   });
 });
 
 describe("direct engagement terms", () => {
-  it("carries the bypass marker, assignee and parsed criteria", () => {
+  it("carries the admin-action marker, assignee and parsed criteria", () => {
     const terms = buildDirectEngageTerms({
       card: card(),
       assigneeAgentId: "p_1:bot",
@@ -88,7 +88,7 @@ describe("direct engagement terms", () => {
       card_id: "c_1",
       assignee_agent_id: "p_1:bot",
       criteria: [{ key: "tests", op: "eq", value: true }],
-      short_circuit: {
+      admin_action: {
         level: "project_owner",
         action: "engage",
         by: "u_owner",
@@ -99,18 +99,18 @@ describe("direct engagement terms", () => {
   });
 });
 
-describe("verify bypass accounting", () => {
+describe("verify skipped-gate accounting", () => {
   it("records evidence_required only for a pass without evidence", () => {
-    expect(verifyBypasses({ verdict: "pass", evidenceCount: 0, verifierConflict: null })).toEqual([
+    expect(collectSkippedGates({ verdict: "pass", evidenceCount: 0, verifierConflict: null })).toEqual([
       "evidence_required",
     ]);
-    expect(verifyBypasses({ verdict: "pass", evidenceCount: 1, verifierConflict: null })).toEqual([]);
-    expect(verifyBypasses({ verdict: "reject", evidenceCount: 0, verifierConflict: null })).toEqual([]);
+    expect(collectSkippedGates({ verdict: "pass", evidenceCount: 1, verifierConflict: null })).toEqual([]);
+    expect(collectSkippedGates({ verdict: "reject", evidenceCount: 0, verifierConflict: null })).toEqual([]);
   });
 
   it("records verifier_conflict independently of evidence", () => {
     expect(
-      verifyBypasses({ verdict: "pass", evidenceCount: 1, verifierConflict: "PROPOSER_IS_VERIFIER" }),
+      collectSkippedGates({ verdict: "pass", evidenceCount: 1, verifierConflict: "PROPOSER_IS_VERIFIER" }),
     ).toEqual(["verifier_conflict"]);
   });
 });

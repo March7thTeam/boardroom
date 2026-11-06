@@ -80,8 +80,8 @@ export function CardDrawer({
   const [interventionReason, setInterventionReason] = useState("");
   const [redirectPriority, setRedirectPriority] = useState(50);
   const [verdictReason, setVerdictReason] = useState("");
-  const [shortCircuitReason, setShortCircuitReason] = useState("");
-  const [shortCircuitTarget, setShortCircuitTarget] = useState("");
+  const [adminActionReason, setAdminActionReason] = useState("");
+  const [adminActionTarget, setAdminActionTarget] = useState("");
 
   const card = detailQuery.data?.card ?? fallbackCard ?? null;
   const events = useMemo(() => {
@@ -94,19 +94,19 @@ export function CardDrawer({
     [card?.criteria_json],
   );
 
-  const canShortCircuit =
+  const canAdminAction =
     currentUser.role === "admin" ||
     projectRole === "owner" ||
     projectRole === "admin";
-  const shortCircuitReady = shortCircuitReason.trim().length >= 8;
-  const shortCircuitAgentsQuery = useQuery({
+  const adminActionReady = adminActionReason.trim().length >= 8;
+  const adminActionAgentsQuery = useQuery({
     queryKey: ["project-agents", projectId],
     queryFn: () => api.getProjectAgents(projectId),
-    enabled: canShortCircuit && card?.status === "open",
+    enabled: canAdminAction && card?.status === "open",
   });
-  const shortCircuitAgents = useMemo(
-    () => (shortCircuitAgentsQuery.data?.agents ?? []).filter((agent) => agent.status === "active"),
-    [shortCircuitAgentsQuery.data],
+  const adminActionAgents = useMemo(
+    () => (adminActionAgentsQuery.data?.agents ?? []).filter((agent) => agent.status === "active"),
+    [adminActionAgentsQuery.data],
   );
 
   const assigneeLabel =
@@ -330,23 +330,23 @@ export function CardDrawer({
     onError: handleWriteError,
   });
 
-  const shortCircuitMutation = useMutation({
+  const adminActionMutation = useMutation({
     mutationFn: (input: {
       action: "engage" | "verify" | "cancel" | "release" | "reset";
       verdict?: "pass" | "reject";
     }) => {
-      const reason = shortCircuitReason.trim();
-      if (reason.length < 8) throw new Error(t("shortCircuit.needReason"));
+      const reason = adminActionReason.trim();
+      if (reason.length < 8) throw new Error(t("adminAction.needReason"));
       if (input.action === "engage") {
-        return api.shortCircuitCard(cardId, {
+        return api.adminActionCard(cardId, {
           action: "engage",
           message_id: crypto.randomUUID(),
           reason,
-          ...(shortCircuitTarget ? { assignee_agent_id: shortCircuitTarget } : {}),
+          ...(adminActionTarget ? { assignee_agent_id: adminActionTarget } : {}),
         });
       }
       if (input.action === "verify") {
-        return api.shortCircuitCard(cardId, {
+        return api.adminActionCard(cardId, {
           action: "verify",
           message_id: crypto.randomUUID(),
           reason,
@@ -356,17 +356,17 @@ export function CardDrawer({
             : undefined,
         });
       }
-      return api.shortCircuitCard(cardId, {
+      return api.adminActionCard(cardId, {
         action: input.action,
         message_id: crypto.randomUUID(),
         reason,
       });
     },
     onSuccess: (result) => {
-      setShortCircuitReason("");
+      setAdminActionReason("");
       setActionBanner({
         type: result.event_pending ? "warning" : "success",
-        message: result.event_pending ? t("common.eventPending") : t("shortCircuit.success"),
+        message: result.event_pending ? t("common.eventPending") : t("adminAction.success"),
       });
       refreshCardAndBoard();
     },
@@ -1122,66 +1122,66 @@ export function CardDrawer({
                       </div>
                     )}
 
-                    {canShortCircuit && card.status !== "closed" && (
+                    {canAdminAction && card.status !== "closed" && (
                       <div className="drawer-action-dialog">
                         <div className="dialog-title">
-                          {t("shortCircuit.title")}
+                          {t("adminAction.title")}
                           <span className="badge badge-neutral">
                             {projectRole === "owner" || projectRole === "admin"
-                              ? t("shortCircuit.levelProject")
-                              : t("shortCircuit.levelInstance")}
+                              ? t("adminAction.levelProject")
+                              : t("adminAction.levelInstance")}
                           </span>
                         </div>
-                        <div className="field-hint">{t("shortCircuit.hint")}</div>
+                        <div className="field-hint">{t("adminAction.hint")}</div>
                         <textarea
                           className="textarea"
                           rows={2}
-                          placeholder={t("shortCircuit.reasonPlaceholder")}
-                          value={shortCircuitReason}
-                          onChange={(e) => setShortCircuitReason(e.target.value)}
+                          placeholder={t("adminAction.reasonPlaceholder")}
+                          value={adminActionReason}
+                          onChange={(e) => setAdminActionReason(e.target.value)}
                         />
                         {card.status === "open" && (
                           <select
                             className="select"
-                            value={shortCircuitTarget}
-                            onChange={(e) => setShortCircuitTarget(e.target.value)}
+                            value={adminActionTarget}
+                            onChange={(e) => setAdminActionTarget(e.target.value)}
                           >
-                            <option value="">{t("shortCircuit.engageLabel")}</option>
-                            {shortCircuitAgents.map((agent) => (
+                            <option value="">{t("adminAction.engageLabel")}</option>
+                            {adminActionAgents.map((agent) => (
                               <option key={agent.id} value={agent.id}>
                                 {agent.resolved_name || agent.slug}
                               </option>
                             ))}
                           </select>
                         )}
-                        {card.status === "open" && shortCircuitAgents.length === 0 && (
-                          <div className="field-hint">{t("shortCircuit.noAgents")}</div>
+                        {card.status === "open" && adminActionAgents.length === 0 && (
+                          <div className="field-hint">{t("adminAction.noAgents")}</div>
                         )}
                         {card.status === "review" && passBlockedByEvidence && (
-                          <div className="field-hint">{t("shortCircuit.bypassEvidence")}</div>
+                          <div className="field-hint">{t("adminAction.skipsEvidence")}</div>
                         )}
                         {card.status === "running" && (
-                          <div className="field-hint">{t("shortCircuit.releaseHint")}</div>
+                          <div className="field-hint">{t("adminAction.releaseHint")}</div>
                         )}
                         {(card.status === "engaged" ||
                           card.status === "running" ||
                           card.status === "review") && (
-                          <div className="field-hint">{t("shortCircuit.resetHint")}</div>
+                          <div className="field-hint">{t("adminAction.resetHint")}</div>
                         )}
-                        <div className="field-hint">{t("shortCircuit.cancelHint")}</div>
+                        <div className="field-hint">{t("adminAction.cancelHint")}</div>
                         <div className="form-actions">
                           {card.status === "open" && (
                             <button
                               type="button"
                               className="btn btn-danger btn-sm"
                               disabled={
-                                shortCircuitMutation.isPending ||
-                                !shortCircuitReady ||
-                                !shortCircuitTarget
+                                adminActionMutation.isPending ||
+                                !adminActionReady ||
+                                !adminActionTarget
                               }
-                              onClick={() => shortCircuitMutation.mutate({ action: "engage" })}
+                              onClick={() => adminActionMutation.mutate({ action: "engage" })}
                             >
-                              {t("shortCircuit.engage")}
+                              {t("adminAction.engage")}
                             </button>
                           )}
                           {card.status === "review" && (
@@ -1189,22 +1189,22 @@ export function CardDrawer({
                               <button
                                 type="button"
                                 className="btn btn-secondary btn-sm"
-                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                disabled={adminActionMutation.isPending || !adminActionReady}
                                 onClick={() =>
-                                  shortCircuitMutation.mutate({ action: "verify", verdict: "reject" })
+                                  adminActionMutation.mutate({ action: "verify", verdict: "reject" })
                                 }
                               >
-                                {t("shortCircuit.verifyReject")}
+                                {t("adminAction.verifyReject")}
                               </button>
                               <button
                                 type="button"
                                 className="btn btn-danger btn-sm"
-                                disabled={shortCircuitMutation.isPending || !shortCircuitReady}
+                                disabled={adminActionMutation.isPending || !adminActionReady}
                                 onClick={() =>
-                                  shortCircuitMutation.mutate({ action: "verify", verdict: "pass" })
+                                  adminActionMutation.mutate({ action: "verify", verdict: "pass" })
                                 }
                               >
-                                {t("shortCircuit.verifyPass")}
+                                {t("adminAction.verifyPass")}
                               </button>
                             </>
                           )}
@@ -1212,10 +1212,10 @@ export function CardDrawer({
                             <button
                               type="button"
                               className="btn btn-secondary btn-sm"
-                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
-                              onClick={() => shortCircuitMutation.mutate({ action: "release" })}
+                              disabled={adminActionMutation.isPending || !adminActionReady}
+                              onClick={() => adminActionMutation.mutate({ action: "release" })}
                             >
-                              {t("shortCircuit.release")}
+                              {t("adminAction.release")}
                             </button>
                           )}
                           {(card.status === "engaged" ||
@@ -1224,19 +1224,19 @@ export function CardDrawer({
                             <button
                               type="button"
                               className="btn btn-secondary btn-sm"
-                              disabled={shortCircuitMutation.isPending || !shortCircuitReady}
-                              onClick={() => shortCircuitMutation.mutate({ action: "reset" })}
+                              disabled={adminActionMutation.isPending || !adminActionReady}
+                              onClick={() => adminActionMutation.mutate({ action: "reset" })}
                             >
-                              {t("shortCircuit.reset")}
+                              {t("adminAction.reset")}
                             </button>
                           )}
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
-                            disabled={shortCircuitMutation.isPending || !shortCircuitReady}
-                            onClick={() => shortCircuitMutation.mutate({ action: "cancel" })}
+                            disabled={adminActionMutation.isPending || !adminActionReady}
+                            onClick={() => adminActionMutation.mutate({ action: "cancel" })}
                           >
-                            {t("shortCircuit.cancel")}
+                            {t("adminAction.cancel")}
                           </button>
                         </div>
                       </div>
