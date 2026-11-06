@@ -15,6 +15,6 @@ healthRoutes.get("/health", async (c) => {
     d1,
     do: c.env.BOARD_DO ? "ok" : "missing",
     environment: c.env.ENVIRONMENT,
-    version: "0.1.0",
+    version: "0.2.0",
   });
 });

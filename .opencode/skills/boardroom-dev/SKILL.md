@@ -30,7 +30,7 @@ Boardroom 是**协商与证据账本**：Agent 询价/承诺/交付证据，人�
 
 ## 数据与迁移规则
 
-- 当前版本 `0.1.0`（beta）；alpha 的 0001–0010 迁移已合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
+- 当前版本 `0.2.0`（beta）；alpha 的 0001–0010 迁移已合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
 - 改表只新增 `migrations/000N_*.sql`，用 `npm run db:migrate` 应用；不要修改已发布迁移，也不要删库重置。
 - `db/schema.sql` 是当前 schema 快照；不要重新引入升级数据迁移兼容（card_events 回查、审计尾巴重建等均已删除）。
 - 时间统一 `nowIso()` / `addDaysIso()`；ID 用 `newId(prefix)` / ULID。

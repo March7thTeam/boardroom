@@ -5,7 +5,7 @@
 | 文档 | 读者 | 内容 |
 |---|---|---|
 | `README.md` | 所有人 | 项目定位、快速开始、当前能力、主要接口、发布/迁移规则 |
-| `CHANGELOG.md` | 所有人 | 版本变更记录（当前 `0.1.0`） |
+| `CHANGELOG.md` | 所有人 | 版本变更记录（当前 `0.2.0`） |
 | `AGENTS.md` | 在本仓库工作的 Agent/人 | 命令、架构边界、编码约定、发布规则、完成标准 |
 | `.opencode/skills/boardroom-dev/SKILL.md` | 编辑本仓库的 Agent | 仓库级编辑要点清单（架构、权限、i18n、测试、常见坑） |
 | `.opencode/skills/boardroom-self-develop/SKILL.md` | 在本仓库开发的 Agent | 通过 `self-develop` 项目接卡、协商、实现、回传证据与关卡的流程 |
@@ -28,7 +28,7 @@
 2. **数据模型变更**：只新增 `migrations/000N_*.sql`，不要修改已发布迁移；本地用 `npm run db:migrate` 应用。
 3. **权限/身份变更**：更新 `docs/auth.md`；Agent 卡片权限同时更新 `docs/AGENT-行为规范-v1.0.md`。
 4. **多语言变更**：`src/i18n/en.ts` 加 key，`zh.ts` 同步；前端同理。
-5. **发布状态**：当前版本 `0.1.0`（beta）；自 beta 起不要原地升级 alpha 数据——所有 alpha 迁移已合并为 `0001_init.sql`，只支持全新建库。
+5. **发布状态**：当前版本 `0.2.0`（beta）；自 beta 起不要原地升级 alpha 数据——所有 alpha 迁移已合并为 `0001_init.sql`，只支持全新建库。
 6. **分支与合并**：严格遵守 AGENTS.md 的「分支与合并（严格，feat → dev → main）」——一切工作从 `dev` 切出分支，`feat → dev` 与 `dev → main` 的 PR 都必须**等待审批**后才能合并。
 
 ## 设计文档
