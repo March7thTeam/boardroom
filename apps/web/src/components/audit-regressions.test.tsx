@@ -6,8 +6,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api, ApiError } from "../api";
 import { I18nProvider } from "../i18n";
 import { App } from "../App";
-import type { Card, Project, UserProfile } from "../types";
+import type { Card, Project, ProjectMember, UserProfile } from "../types";
 import { CardDrawer } from "./CardDrawer";
+import { ProjectParticipantsPanel } from "./ProjectParticipantsPanel";
 import { SetupWizard } from "./SetupWizard";
 import { AdminPanel } from "./AdminPanel";
 
@@ -36,6 +37,76 @@ function completeWizard(container: HTMLElement) {
 }
 
 describe("audit UI contracts", () => {
+  it("shows the admin action panel to a project owner who is not an instance admin", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: 0 } } });
+    client.setQueryData(["card", card.id], { card, events: [] });
+    vi.spyOn(api, "getProjectAgents").mockResolvedValue({ agents: [] });
+    const owner: UserProfile = { ...admin, id: "usr_owner", email: "owner@example.com", role: "member" };
+    mount(
+      <CardDrawer
+        cardId={card.id}
+        projectId={project.id}
+        projectRole="owner"
+        agentNameMap={new Map()}
+        currentUser={owner}
+        onClose={vi.fn()}
+      />,
+      client,
+    );
+    expect(await screen.findByText("管理员操作")).toBeTruthy();
+    expect(screen.getByText("项目级")).toBeTruthy();
+  });
+
+  it("shows the admin action panel to a project admin who is not an instance admin", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: 0 } } });
+    client.setQueryData(["card", card.id], { card, events: [] });
+    vi.spyOn(api, "getProjectAgents").mockResolvedValue({ agents: [] });
+    const projectAdmin: UserProfile = { ...admin, id: "usr_padmin", email: "padmin@example.com", role: "member" };
+    mount(
+      <CardDrawer
+        cardId={card.id}
+        projectId={project.id}
+        projectRole="admin"
+        agentNameMap={new Map()}
+        currentUser={projectAdmin}
+        onClose={vi.fn()}
+      />,
+      client,
+    );
+    expect(await screen.findByText("管理员操作")).toBeTruthy();
+    expect(screen.getByText("项目级")).toBeTruthy();
+  });
+
+  it("lets the project owner change a member's project permissions", async () => {
+    const members: ProjectMember[] = [
+      { id: "usr_owner", email: "owner@example.com", display_name: null, global_role: "member", global_status: "active", role: "owner", added_at: card.created_at },
+      { id: "usr_member", email: "member@example.com", display_name: null, global_role: "member", global_status: "active", role: "member", added_at: card.created_at },
+    ];
+    vi.spyOn(api, "getProjectJoinRequests").mockResolvedValue({ join_requests: [] });
+    const update = vi.spyOn(api, "updateProjectMemberRole").mockResolvedValue({ member: { ...members[1], role: "admin" } });
+    mount(
+      <ProjectParticipantsPanel
+        projectId={project.id}
+        currentUserId="usr_owner"
+        canManage
+        members={members}
+        membersLoading={false}
+        membersError={null}
+        agents={[]}
+        agentsLoading={false}
+        agentsError={null}
+        onRefreshMembers={vi.fn()}
+        onRefreshAgents={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    const select = await screen.findByLabelText("修改权限");
+    fireEvent.change(select, { target: { value: "admin" } });
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(project.id, "usr_member", "admin"),
+    );
+  });
+
   it("keeps the edit version frozen when a newer card snapshot arrives", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: 0 } } });
     client.setQueryData(["card", card.id], { card, events: [] });

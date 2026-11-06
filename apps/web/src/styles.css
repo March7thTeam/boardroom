@@ -804,6 +804,17 @@ textarea:focus-visible {
   padding: 2px 0;
 }
 
+.participants-role-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.participants-role-control .select {
+  max-width: 160px;
+}
+
 .participants-self-badge {
   margin-left: 6px;
 }
@@ -1949,6 +1960,12 @@ textarea:focus-visible {
   background: var(--warning-bg);
   color: var(--warning-fg);
   border-color: var(--warning-border);
+}
+
+.badge-project-admin {
+  background: color-mix(in srgb, var(--success-fg) 10%, transparent);
+  color: var(--success-fg);
+  border-color: color-mix(in srgb, var(--success-fg) 24%, transparent);
 }
 
 .prio-high {

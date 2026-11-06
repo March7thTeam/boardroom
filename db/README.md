@@ -1,6 +1,6 @@
 # Database
 
-当前版本 `0.1.0`（beta）起，数据库使用**单一初始迁移**：
+自beta版本起，数据库使用**单一初始迁移**：
 
 ```bash
 npm run db:migrate          # 本地

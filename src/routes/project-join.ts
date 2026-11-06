@@ -63,7 +63,7 @@ projectJoinRoutes.post(
       "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
     )
       .bind(project.id, user.id)
-      .first<{ role: "owner" | "member" }>();
+      .first<{ role: "owner" | "admin" | "member" }>();
     if (membership) {
       throw new HttpError(409, "ALREADY_MEMBER", "you are already a member of this project");
     }

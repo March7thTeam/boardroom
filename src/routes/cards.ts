@@ -3,11 +3,20 @@ import type { Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import { assertTransition } from "../domain/state-machine";
-import { buildContractReceipt } from "../domain/negotiation";
+import { buildContractReceipt, termsHash } from "../domain/negotiation";
 import { guardedCardWrite, retireCardWork } from "../domain/execution";
+import {
+  assertAdminActionLevel,
+  assertAdminActionState,
+  buildDirectEngageTerms,
+  collectSkippedGates,
+  resolveAdminActionLevel,
+  type AdminActionLevel,
+} from "../domain/admin-action";
 import { resolveProjectAgentReference } from "../domain/agent-projects";
 import { verifierConflict } from "../domain/verification";
 import { HttpError } from "../lib/http-error";
+import { sha256Hex } from "../lib/crypto";
 import { commitAndPublish, findExistingEvent } from "../lib/event-store";
 import { parseBody, parseIfMatch, parseLimit } from "../lib/http";
 import { newId } from "../lib/ids";
@@ -97,6 +106,50 @@ const interventionSchema = z.object({
     .optional(),
 });
 
+const verifyReasonsSchema = z
+  .array(
+    z.object({
+      key: z.string().max(80).optional(),
+      message: z.string().max(500),
+      pass: z.boolean().optional(),
+    }),
+  )
+  .max(100)
+  .optional();
+
+const adminActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("engage"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+    assignee_agent_id: z.string().min(1).optional(),
+  }),
+  z.object({
+    action: z.literal("verify"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+    verdict: z.enum(["pass", "reject"]),
+    reasons: verifyReasonsSchema,
+    score: z.number().min(0).max(1).optional(),
+    rule_version: z.string().max(50).optional(),
+  }),
+  z.object({
+    action: z.literal("cancel"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
+  z.object({
+    action: z.literal("release"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
+  z.object({
+    action: z.literal("reset"),
+    message_id: z.string().min(8).max(80).optional(),
+    reason: z.string().min(8).max(2000),
+  }),
+]);
+
 interface CardWithNames extends CardRow {
   assignee_name: string | null;
   requester_name: string | null;
@@ -128,7 +181,7 @@ async function loadCardForUser(c: Context<AppEnv>, cardId: string): Promise<Card
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
     .bind(card.project_id, user.id)
-    .first<{ role: "owner" | "member" }>();
+    .first<{ role: "owner" | "admin" | "member" }>();
   if (!membership && !isAdmin(user)) throw new HttpError(404, "NOT_FOUND", "card not found");
   return card;
 }
@@ -323,8 +376,8 @@ cardRoutes.post("/cards/:cid/commit", requireUser, async (c) => {
       "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
     )
       .bind(card.project_id, user.id)
-      .first<{ role: "owner" | "member" }>();
-    if (membership?.role !== "owner" && !isAdmin(user)) {
+      .first<{ role: "owner" | "admin" | "member" }>();
+    if (membership?.role !== "owner" && membership?.role !== "admin" && !isAdmin(user)) {
       throw new HttpError(403, "FORBIDDEN", "only a project owner can accept an agent-created card");
     }
   } else if (card.created_by_id !== user.id) {
@@ -477,7 +530,36 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   if (card.status !== "review") {
-    throw new HttpError(409, "CARD_NOT_IN_REVIEW", "verdict requires a card in review");
+    const project = await c.env.DB.prepare(
+      "SELECT verification_mode FROM projects WHERE id = ?1",
+    )
+      .bind(card.project_id)
+      .first<{ verification_mode: "human" | "rule" }>();
+    if (card.status !== "engaged" || project?.verification_mode !== "human") {
+      throw new HttpError(409, "CARD_NOT_IN_REVIEW", "verdict requires a card in review");
+    }
+  }
+
+  // Human mode may close an engaged contract directly: there is no execution
+  // target to produce a run/ticket, so a human attestation is the evidence.
+  const humanAttestation = card.status === "engaged";
+  const attestationNote = (body.reasons ?? [])
+    .map((reason) => reason.message.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (humanAttestation && attestationNote.length < 8) {
+    throw new HttpError(
+      400,
+      "ATTESTATION_REQUIRED",
+      "human acceptance requires a note of at least 8 characters",
+    );
+  }
+  if (humanAttestation && body.verdict === "needs_more") {
+    throw new HttpError(
+      409,
+      "ILLEGAL_TRANSITION",
+      "needs_more is only available for cards in review; use reopen or intervene",
+    );
   }
 
   const contract = await c.env.DB.prepare(
@@ -489,7 +571,7 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
     throw new HttpError(409, "VERIFIER_CONFLICT", "the proposer cannot verify this card");
   }
 
-  if (body.verdict === "pass") {
+  if (body.verdict === "pass" && !humanAttestation) {
     const evidence = await c.env.DB.prepare(
       "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
     )
@@ -501,14 +583,26 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   const now = nowIso();
+  const attestationId = humanAttestation ? newId("ev") : null;
+  const attestationHash = humanAttestation
+    ? await sha256Hex(`${card.id}\n${user.id}\n${now}\n${attestationNote}`)
+    : null;
+  const attestationDigest = attestationHash ? `sha256:${attestationHash}` : null;
   const reasonsJson = JSON.stringify({
     verdict: body.verdict,
     reasons: body.reasons ?? [],
     score: body.score ?? null,
     rule_version: body.rule_version ?? null,
-    self_reported: true,
+    self_reported: !humanAttestation,
     verified_by: user.id,
     verified_at: now,
+    ...(humanAttestation
+      ? {
+          human_attested: true,
+          verification_mode: "human",
+          attestation_id: attestationId,
+        }
+      : {}),
   });
 
   if (body.verdict === "needs_more") {
@@ -537,28 +631,65 @@ cardRoutes.post("/cards/:cid/verify", requireUser, async (c) => {
   }
 
   const outcome = body.verdict === "pass" ? "done" : "rejected";
-  assertTransition("verdict", "review", outcome);
+  assertTransition(humanAttestation ? "attest" : "verdict", card.status, outcome);
   const cardWrite = c.env.DB.prepare(
     `UPDATE cards SET status = 'closed', outcome = ?1, verifier_id = ?2,
-            verdict_reasons_json = ?3, version = version + 1, updated_at = ?4
-      WHERE id = ?5 AND version = ?6 AND status = 'review'`,
+            verdict_reasons_json = ?3, evidence_hash = COALESCE(?4, evidence_hash),
+            version = version + 1, updated_at = ?5
+      WHERE id = ?6 AND version = ?7 AND status = ?8`,
   )
-    .bind(outcome, user.id, reasonsJson, now, card.id, card.version);
-  const related = contract ? [guardedCardWrite(c.env.DB, card,
-    "UPDATE contracts SET state = ?1, closed_at = ?2 WHERE id = ?3 AND state = 'active' AND /* current_card */",
-    [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id])] : [];
+    .bind(outcome, user.id, reasonsJson, attestationDigest, now, card.id, card.version, card.status);
+  const attestationStatement = humanAttestation
+    ? guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO evidence
+           (id, card_id, kind, sha256, size_bytes, media_type, summary, produced_by, created_at)
+         SELECT ?1, ?2, 'attestation', ?3, ?4, 'text/plain', ?5, ?6, ?7 WHERE /* current_card */`,
+        [
+          attestationId!,
+          card.id,
+          attestationHash!,
+          new TextEncoder().encode(attestationNote).length,
+          attestationNote.slice(0, 500),
+          user.id,
+          now,
+        ],
+      )
+    : null;
+  const related = [
+    ...(attestationStatement ? [attestationStatement] : []),
+    ...(contract
+      ? [
+          guardedCardWrite(
+            c.env.DB,
+            card,
+            "UPDATE contracts SET state = ?1, closed_at = ?2 WHERE id = ?3 AND state = 'active' AND /* current_card */",
+            [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id],
+          ),
+        ]
+      : []),
+  ];
   const { seq, eventId, eventPending, card: updated } = await appendCardEvent(
     c,
     card,
     "card.verdict",
     {
       verdict: body.verdict,
-      from: "review",
+      from: card.status,
       to: "closed",
       outcome,
       reasons: body.reasons ?? [],
       score: body.score ?? null,
       rule_version: body.rule_version ?? null,
+      ...(humanAttestation
+        ? {
+            human_attested: true,
+            verification_mode: "human",
+            attestation_id: attestationId,
+            evidence_hash: attestationDigest,
+          }
+        : {}),
     },
     body.message_id, [...related, cardWrite],
   );
@@ -746,6 +877,479 @@ cardRoutes.post("/cards/:cid/intervene", requireUser, async (c) => {
       affected_subtree: affectedSubtree,
       seq,
       event_id: eventId, ...eventReceipt, event_pending: eventPending,
+    },
+    eventPending ? 202 : 200,
+  );
+});
+
+/**
+ * Governance admin action. Two levels share the same action set; the scope
+ * differs: a project owner may act only inside the looked-up project, while an
+ * instance admin may act on any unarchived project (loadCardForUser already
+ * grants that access). Every branch writes one card.admin_action event and
+ * the usual card CAS, so seq/audit/SSE invariants are unchanged.
+ */
+cardRoutes.post("/cards/:cid/admin-action", requireUser, async (c) => {
+  const user = c.get("user");
+  const card = await loadCardForUser(c, c.req.param("cid"));
+  const body = await parseBody(c, adminActionSchema);
+
+  const membership = await c.env.DB.prepare(
+    "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
+  )
+    .bind(card.project_id, user.id)
+    .first<{ role: "owner" | "admin" | "member" }>();
+  const level: AdminActionLevel | null = resolveAdminActionLevel({
+    globalAdmin: isAdmin(user),
+    projectRole: membership?.role ?? null,
+  });
+  assertAdminActionLevel(level);
+
+  if (body.message_id) {
+    const duplicate = await findExistingCardMessage(c, card.id, body.message_id);
+    if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
+  }
+
+  assertAdminActionState(body.action, card);
+
+  const now = nowIso();
+
+  if (body.action === "engage") {
+    const target = body.assignee_agent_id ?? card.assignee_agent_id;
+    if (!target) {
+      throw new HttpError(400, "ASSIGNEE_REQUIRED", "engage requires an assignee agent");
+    }
+    const resolved = await resolveProjectAgentReference(c.env.DB, card.project_id, target);
+    if (!resolved) {
+      throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
+    }
+    if (card.created_by_type === "agent" && card.created_by_id === resolved) {
+      throw new HttpError(409, "SELF_ASSIGNMENT", "cannot directly engage the card creator");
+    }
+    const agent = await c.env.DB.prepare(
+      `SELECT ap.agent_id
+         FROM agent_projects ap
+         JOIN projects p ON p.id = ap.project_id
+        WHERE ap.agent_id = ?1 AND ap.project_id = ?2 AND ap.status = 'active'
+          AND p.archived_at IS NULL`,
+    )
+      .bind(resolved, card.project_id)
+      .first();
+    if (!agent) {
+      throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
+    }
+
+    const existingSession = await c.env.DB.prepare(
+      "SELECT id, state FROM negotiation_sessions WHERE card_id = ?1 AND round = ?2",
+    )
+      .bind(card.id, card.round)
+      .first<{ id: string; state: string }>();
+    if (existingSession) {
+      if (existingSession.state === "open") {
+        throw new HttpError(409, "NEGOTIATION_OPEN", "an open negotiation session already exists; use commit");
+      }
+      throw new HttpError(409, "ADMIN_ACTION_STATE", "the current round already has a negotiation record", {
+        action: body.action,
+        session_id: existingSession.id,
+        session_state: existingSession.state,
+      });
+    }
+    const activeContract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    if (activeContract) {
+      throw new HttpError(409, "CONTRACT_CONFLICT", "an active contract already exists for this card");
+    }
+
+    const terms = buildDirectEngageTerms({
+      card,
+      assigneeAgentId: resolved,
+      level,
+      actorUserId: user.id,
+      reason: body.reason,
+      now,
+    });
+    const termsJson = JSON.stringify(terms);
+    const hash = await termsHash(terms);
+    const sessionId = newId("ns");
+    const proposalId = newId("p");
+    const contractId = newId("ct");
+    const proofJson = JSON.stringify({
+      type: "admin_action",
+      level,
+      by_type: "user",
+      by_id: user.id,
+      reason: body.reason,
+      accepted_at: now,
+      synthetic: true,
+    });
+    const skippedGates = ["proposal", "agent_acceptance"] as const;
+
+    const mutations = [
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO negotiation_sessions
+           (id, card_id, initiator_agent_id, initiator_user_id, responder_agent_id, round,
+            state, created_at, closed_at)
+         SELECT ?1, ?2, NULL, ?3, ?4, ?5, 'committed', ?6, ?6
+          WHERE /* current_card */
+            AND NOT EXISTS (SELECT 1 FROM negotiation_sessions WHERE card_id = ?2 AND round = ?5)
+            AND NOT EXISTS (SELECT 1 FROM contracts WHERE card_id = ?2 AND state = 'active')`,
+        [sessionId, card.id, user.id, resolved, card.round, now],
+      ),
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO proposals
+           (id, session_id, from_agent_id, seq_in_session, terms_json, terms_hash, status, created_at)
+         SELECT ?1, ?2, ?3, 1, ?4, ?5, 'accepted', ?6
+          WHERE /* current_card */
+            AND EXISTS (SELECT 1 FROM negotiation_sessions WHERE id = ?2 AND state = 'committed')`,
+        [proposalId, sessionId, resolved, termsJson, hash, now],
+      ),
+      guardedCardWrite(
+        c.env.DB,
+        card,
+        `INSERT INTO contracts
+           (id, card_id, session_id, proposer_agent_id, proposer_user_id, acceptor_agent_id,
+            acceptor_user_id, terms_json, terms_hash, acceptance_proof_json, state, version, created_at)
+         SELECT ?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, ?8, 'active', 1, ?9
+          WHERE /* current_card */
+            AND EXISTS (SELECT 1 FROM proposals WHERE id = ?10 AND status = 'accepted')`,
+        [contractId, card.id, sessionId, resolved, user.id, termsJson, hash, proofJson, now, proposalId],
+      ),
+      c.env.DB.prepare(
+        `UPDATE cards SET status = 'engaged', outcome = NULL, assignee_agent_id = ?1,
+                assignee_user_id = NULL, version = version + 1, updated_at = ?2
+          WHERE id = ?3 AND version = ?4 AND status = 'open' AND paused_at IS NULL
+            AND EXISTS (SELECT 1 FROM contracts WHERE id = ?5 AND state = 'active')`,
+      ).bind(resolved, now, card.id, card.version, contractId),
+    ];
+
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.admin_action",
+      {
+        action: "engage",
+        level,
+        reason: body.reason,
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "engage", reason: body.reason, skipped_gates: skippedGates },
+        from: "open",
+        to: "engaged",
+        synthetic: true,
+        assignee_agent_id: resolved,
+        session_id: sessionId,
+        proposal_id: proposalId,
+        contract_id: contractId,
+        terms_hash: hash,
+      },
+      body.message_id,
+      mutations,
+      { level, action: "engage", session_id: sessionId, proposal_id: proposalId, contract_id: contractId, terms_hash: hash, skipped_gates: skippedGates },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "engage",
+        admin_action: { level, action: "engage", reason: body.reason, skipped_gates: skippedGates },
+        session_id: sessionId,
+        proposal_id: proposalId,
+        contract_id: contractId,
+        terms_hash: hash,
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 201,
+    );
+  }
+
+  if (body.action === "cancel") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const related = retireCardWork(c.env.DB, card, now, "superseded", "cancelled");
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'closed', outcome = 'cancelled', version = version + 1,
+              lease_owner = NULL, lease_expires_at = NULL, paused_at = NULL, updated_at = ?1
+        WHERE id = ?2 AND version = ?3 AND status <> 'closed'`,
+    ).bind(now, card.id, card.version);
+    const skippedGates = ["active_work"] as const;
+    const attemptsAbandoned = attempts.results.length;
+    const wasPaused = Boolean(card.paused_at);
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.admin_action",
+      {
+        action: "cancel",
+        level,
+        reason: body.reason,
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "cancel", reason: body.reason, skipped_gates: skippedGates },
+        from: card.status,
+        to: "closed",
+        outcome: "cancelled",
+        attempts_abandoned: attemptsAbandoned,
+        was_paused: wasPaused,
+        contract_state: contract ? "superseded" : null,
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [...related, cardWrite],
+      { level, action: "cancel", from: card.status, to: "closed", outcome: "cancelled", attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "cancel",
+        admin_action: { level, action: "cancel", reason: body.reason, skipped_gates: skippedGates },
+        outcome: "cancelled",
+        attempts_abandoned: attemptsAbandoned,
+        was_paused: wasPaused,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
+    );
+  }
+
+  if (body.action === "release") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const leaseOwner = card.lease_owner;
+    const attemptWrite = guardedCardWrite(
+      c.env.DB,
+      card,
+      `UPDATE attempts SET status = 'abandoned', ended_at = ?1
+        WHERE card_id = ?2 AND status IN ('issued','running') AND /* current_card */`,
+      [now, card.id],
+    );
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'engaged', version = version + 1,
+              lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
+        WHERE id = ?2 AND version = ?3 AND status = 'running' AND paused_at IS NULL`,
+    ).bind(now, card.id, card.version);
+    const skippedGates = ["attempt_lease"] as const;
+    const attemptsAbandoned = attempts.results.length;
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.admin_action",
+      {
+        action: "release",
+        level,
+        reason: body.reason,
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "release", reason: body.reason, skipped_gates: skippedGates },
+        from: "running",
+        to: "engaged",
+        attempt_ids: attempts.results.map((attempt) => attempt.id),
+        attempts_abandoned: attemptsAbandoned,
+        lease_owner: leaseOwner,
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [attemptWrite, cardWrite],
+      { level, action: "release", from: "running", to: "engaged", attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "release",
+        admin_action: { level, action: "release", reason: body.reason, skipped_gates: skippedGates },
+        attempts_abandoned: attemptsAbandoned,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
+    );
+  }
+
+  if (body.action === "reset") {
+    const attempts = await c.env.DB.prepare(
+      "SELECT id FROM attempts WHERE card_id = ?1 AND status IN ('issued','running')",
+    )
+      .bind(card.id)
+      .all<{ id: string }>();
+    const evidence = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
+    )
+      .bind(card.id)
+      .first<{ count: number }>();
+    const contract = await c.env.DB.prepare(
+      "SELECT id FROM contracts WHERE card_id = ?1 AND state = 'active'",
+    )
+      .bind(card.id)
+      .first<{ id: string }>();
+    const related = retireCardWork(c.env.DB, card, now, "superseded", "cancelled");
+    const nextRound = card.round + 1;
+    const cardWrite = c.env.DB.prepare(
+      `UPDATE cards SET status = 'open', outcome = NULL, round = ?1,
+              verifier_id = NULL, verdict_reasons_json = NULL, evidence_hash = NULL,
+              assignee_agent_id = NULL, assignee_user_id = NULL,
+              lease_owner = NULL, lease_expires_at = NULL, paused_at = NULL,
+              version = version + 1, updated_at = ?2
+        WHERE id = ?3 AND version = ?4 AND status IN ('engaged','running','review')`,
+    ).bind(nextRound, now, card.id, card.version);
+    const roundLimitSkipped = nextRound > 5;
+    const skippedGates = roundLimitSkipped
+      ? (["active_work", "round_limit"] as const)
+      : (["active_work"] as const);
+    const attemptsAbandoned = attempts.results.length;
+    const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+      c,
+      card,
+      "card.admin_action",
+      {
+        action: "reset",
+        level,
+        reason: body.reason,
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "reset", reason: body.reason, skipped_gates: skippedGates },
+        from: card.status,
+        to: "open",
+        round: nextRound,
+        round_limit_skipped: roundLimitSkipped,
+        attempts_abandoned: attemptsAbandoned,
+        evidence_count: Number(evidence?.count ?? 0),
+        contract_id: contract?.id ?? null,
+      },
+      body.message_id,
+      [...related, cardWrite],
+      { level, action: "reset", from: card.status, to: "open", round: nextRound, attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
+    );
+    return c.json(
+      {
+        card: updated ?? card,
+        level,
+        action: "reset",
+        admin_action: { level, action: "reset", reason: body.reason, skipped_gates: skippedGates },
+        round: nextRound,
+        attempts_abandoned: attemptsAbandoned,
+        ...(contract ? { contract_id: contract.id } : {}),
+        seq,
+        event_id: eventId,
+        ...receipt,
+        event_pending: eventPending,
+      },
+      eventPending ? 202 : 200,
+    );
+  }
+
+  const evidence = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM evidence WHERE card_id = ?1",
+  )
+    .bind(card.id)
+    .first<{ count: number }>();
+  const evidenceCount = Number(evidence?.count ?? 0);
+  const contract = await c.env.DB.prepare(
+    "SELECT * FROM contracts WHERE card_id = ?1 AND state = 'active'",
+  )
+    .bind(card.id)
+    .first<ContractRow>();
+  const conflict = contract ? verifierConflict(contract, user.id) : null;
+  const skippedGates = collectSkippedGates({ verdict: body.verdict, evidenceCount, verifierConflict: conflict });
+  const outcome = body.verdict === "pass" ? "done" : "rejected";
+  assertTransition("verdict", "review", outcome);
+
+  const reasonsJson = JSON.stringify({
+    verdict: body.verdict,
+    reasons: body.reasons ?? [],
+    score: body.score ?? null,
+    rule_version: body.rule_version ?? null,
+    self_reported: true,
+    verified_by: user.id,
+    verified_at: now,
+    admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
+  });
+
+  const related = contract
+    ? [
+        guardedCardWrite(
+          c.env.DB,
+          card,
+          `UPDATE contracts SET state = ?1, closed_at = ?2
+            WHERE id = ?3 AND state = 'active' AND /* current_card */`,
+          [body.verdict === "pass" ? "fulfilled" : "breached", now, contract.id],
+        ),
+      ]
+    : [];
+  const cardWrite = c.env.DB.prepare(
+    `UPDATE cards SET status = 'closed', outcome = ?1, verifier_id = ?2,
+            verdict_reasons_json = ?3, version = version + 1, updated_at = ?4
+      WHERE id = ?5 AND version = ?6 AND status = 'review' AND paused_at IS NULL`,
+  ).bind(outcome, user.id, reasonsJson, now, card.id, card.version);
+
+  const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
+    c,
+    card,
+    "card.admin_action",
+    {
+      action: "verify",
+      level,
+      reason: body.reason,
+      skipped_gates: skippedGates,
+      admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
+      from: "review",
+      to: "closed",
+      outcome,
+      verdict: body.verdict,
+      evidence_count: evidenceCount,
+      contract_id: contract?.id ?? null,
+      verifier_conflict: conflict,
+      reasons: body.reasons ?? [],
+      score: body.score ?? null,
+      rule_version: body.rule_version ?? null,
+    },
+    body.message_id,
+    [...related, cardWrite],
+    { level, action: "verify", verdict: body.verdict, outcome, evidence_count: evidenceCount, skipped_gates: skippedGates },
+  );
+  return c.json(
+    {
+      card: updated ?? card,
+      level,
+      action: "verify",
+      admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
+      verdict: body.verdict,
+      outcome,
+      evidence_count: evidenceCount,
+      ...(contract ? { contract_id: contract.id } : {}),
+      seq,
+      event_id: eventId,
+      ...receipt,
+      event_pending: eventPending,
     },
     eventPending ? 202 : 200,
   );

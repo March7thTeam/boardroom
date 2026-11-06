@@ -83,7 +83,7 @@ npm run verify-audit -- <project_id>
 
 ## 发布规则（重要）
 
-- 当前版本：`0.1.0`（beta）。自 beta 起所有 alpha 增量迁移合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
+- 当前版本：`0.2.0`（beta）。自 beta 起所有 alpha 增量迁移合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
 - `wrangler.jsonc` 默认 `ENVIRONMENT=production`；本地 `.dev.vars` 覆盖为 `development`，不要把 `.dev.vars` 提交。
 - `wrangler.jsonc` 的 `"keep_vars": true` 保护 Dashboard 中的实例变量（`APP_BASE_URL`、`ADMIN_EMAILS`、`AUTH_MODE`、`ENVIRONMENT`）；Secrets 由 `wrangler secret put` 管理，不会被 deploy 覆盖。
 - 数据库以 `migrations/0001_init.sql` 为起点；改表只新增 `000N_*.sql`，用 `npm run db:migrate` 应用。**不要再使用删库重置**。

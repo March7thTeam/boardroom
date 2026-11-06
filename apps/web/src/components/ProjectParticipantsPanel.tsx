@@ -6,6 +6,7 @@ import {
   Check,
   Plus,
   RefreshCw,
+  Shield,
   Trash2,
   UserRound,
   Users,
@@ -60,6 +61,7 @@ export function ProjectParticipantsPanel({
   const queryClient = useQueryClient();
 
   const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"admin" | "member">("member");
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [confirmTransferId, setConfirmTransferId] = useState<string | null>(null);
   const [banner, setBanner] = useState<Banner | null>(null);
@@ -74,9 +76,10 @@ export function ProjectParticipantsPanel({
 
   const addMemberMutation = useMutation({
     mutationFn: () =>
-      api.addProjectMember(projectId, { email: email.trim() }),
+      api.addProjectMember(projectId, { email: email.trim(), role }),
     onSuccess: () => {
       setEmail("");
+      setRole("member");
       setBanner({ type: "success", text: t("participants.added") });
       refreshMembers();
     },
@@ -118,6 +121,27 @@ export function ProjectParticipantsPanel({
       setBanner({
         type: "error",
         text: describeError(error, t("participants.removeFailed")),
+      });
+    },
+  });
+
+  const updateRoleMutation = useMutation({
+    mutationFn: ({
+      userId,
+      nextRole,
+    }: {
+      userId: string;
+      nextRole: "admin" | "member";
+    }) => api.updateProjectMemberRole(projectId, userId, nextRole),
+    onSuccess: () => {
+      setBanner({ type: "success", text: t("participants.roleUpdated") });
+      refreshMembers();
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (error) => {
+      setBanner({
+        type: "error",
+        text: describeError(error, t("participants.updateFailed")),
       });
     },
   });
@@ -272,6 +296,24 @@ export function ProjectParticipantsPanel({
                 required
               />
               <span className="field-hint">{t("participants.emailHint")}</span>
+            </div>
+
+            <div className="form-field">
+              <label htmlFor="participant-role">
+                <Shield size={12} aria-hidden="true" /> {t("participants.role")}
+              </label>
+              <select
+                id="participant-role"
+                className="select"
+                value={role}
+                onChange={(event) =>
+                  setRole(event.target.value as "admin" | "member")
+                }
+              >
+                <option value="member">{t("participants.roleMember")}</option>
+                <option value="admin">{t("participants.roleAdmin")}</option>
+              </select>
+              <span className="field-hint">{t("participants.roleHint")}</span>
             </div>
 
             <span className="field-hint">{t("participants.ownerHint")}</span>
@@ -429,7 +471,39 @@ export function ProjectParticipantsPanel({
                     </div>
 
                     {canManage && !isSelf && !isOwner && (
-                      <div className="drawer-header-actions">
+                      <>
+                        <div className="participants-role-control">
+                          <label
+                            className="field-hint"
+                            htmlFor={`participant-role-${member.id}`}
+                          >
+                            <Shield size={12} aria-hidden="true" />{" "}
+                            {t("participants.changeRole")}
+                          </label>
+                          <select
+                            id={`participant-role-${member.id}`}
+                            className="select select-sm"
+                            value={member.role}
+                            disabled={updateRoleMutation.isPending}
+                            onChange={(event) =>
+                              updateRoleMutation.mutate({
+                                userId: member.id,
+                                nextRole: event.target.value as
+                                  | "admin"
+                                  | "member",
+                              })
+                            }
+                          >
+                            <option value="member">
+                              {t("participants.roleMember")}
+                            </option>
+                            <option value="admin">
+                              {t("participants.roleAdmin")}
+                            </option>
+                          </select>
+                        </div>
+
+                        <div className="drawer-header-actions">
                         {confirmingTransfer ? (
                           <>
                             <button
@@ -494,7 +568,8 @@ export function ProjectParticipantsPanel({
                             </button>
                           </>
                         )}
-                      </div>
+                        </div>
+                      </>
                     )}
                   </div>
                 );

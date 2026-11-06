@@ -22,7 +22,7 @@ const profileSchema = z.object({
 type AgentMembershipRow = {
   project_id: string; slug: string; name: string;
   project_status: "pending" | "active" | "disabled";
-  role: "owner" | "member" | null;
+  role: "owner" | "admin" | "member" | null;
   local_slug: string | null; display_name: string | null; token_version: number;
 };
 

@@ -1,10 +1,11 @@
-export type ProjectRole = "owner" | "member";
+export type ProjectRole = "owner" | "admin" | "member";
 
 export type ProjectSummary = {
   id: string;
   slug: string;
   name: string;
   role: ProjectRole;
+  verification_mode?: "human" | "rule";
   /** `admin`: reached as an instance admin without project membership (#5). */
   access?: "member" | "admin";
   archived_at?: string | null;

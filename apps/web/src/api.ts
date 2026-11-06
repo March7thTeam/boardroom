@@ -298,6 +298,57 @@ export const api = {
     );
   },
 
+  adminActionCard(
+    cardId: string,
+    input:
+      | {
+          action: "engage";
+          message_id?: string;
+          reason: string;
+          assignee_agent_id?: string;
+        }
+      | {
+          action: "verify";
+          message_id?: string;
+          reason: string;
+          verdict: "pass" | "reject";
+          reasons?: Array<{ key?: string; message: string; pass?: boolean }>;
+          score?: number;
+          rule_version?: string;
+        }
+      | {
+          action: "cancel" | "release" | "reset";
+          message_id?: string;
+          reason: string;
+        },
+  ): Promise<
+    {
+      card: Card;
+      level: "project_owner" | "project_admin" | "instance_admin";
+      action: "engage" | "verify" | "cancel" | "release" | "reset";
+      admin_action: {
+        level: "project_owner" | "project_admin" | "instance_admin";
+        action: "engage" | "verify" | "cancel" | "release" | "reset";
+        reason: string;
+        skipped_gates: string[];
+      };
+      session_id?: string;
+      proposal_id?: string;
+      contract_id?: string;
+      verdict?: "pass" | "reject";
+      outcome?: string;
+      evidence_count?: number;
+      attempts_abandoned?: number;
+      was_paused?: boolean;
+      round?: number;
+    } & WriteReceipt
+  > {
+    return request(
+      `/cards/${encodeURIComponent(cardId)}/admin-action`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  },
+
   updateProject(
     projectId: string,
     input: {
@@ -373,7 +424,7 @@ export const api = {
 
   addProjectMember(
     projectId: string,
-    input: { email: string; role?: "member" },
+    input: { email: string; role?: "admin" | "member" },
   ): Promise<{ member: ProjectMember }> {
     return request<{ member: ProjectMember }>(
       `/projects/${encodeURIComponent(projectId)}/members`,
@@ -384,7 +435,7 @@ export const api = {
   updateProjectMemberRole(
     projectId: string,
     userId: string,
-    role: "owner" | "member",
+    role: "owner" | "admin" | "member",
   ): Promise<{ member: ProjectMember }> {
     return request<{ member: ProjectMember }>(
       `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
