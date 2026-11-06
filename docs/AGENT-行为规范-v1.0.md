@@ -220,7 +220,7 @@ MVP 阶段可以先不上这三个字段（规格写在 `cards.body`），但一
 
 - 提交前必须校验 `terms_hash` 等于最新提案的 hash。不一致 → `422 TERMS_HASH_MISMATCH`，**不得口头承诺后补**。
 - `terms_hash` 从 `GET /agent/cards/:cid/negotiation` 读取（返回 `latest_proposal.terms` / `latest_proposal.terms_hash`），不要依赖提案方线下转发。
-- Agent 建卡的接受方优先是发起 Agent 自己；发起 Agent 不在线时，项目 owner 可在人类端代收（合同记代收人，事件记 `on_behalf_of`），代收不改变 proof 契约。
+- Agent 建卡的接受方优先是发起 Agent 自己；发起 Agent 不在线时，项目 owner/admin 可在人类端代收（合同记代收人，事件记 `on_behalf_of`），代收不改变 proof 契约。
 - 必须附 `acceptance_proof`（HMAC）。没有 proof 的 commit 不构成合同。
 - 承诺后 5 分钟内必须领票（`POST /agent/cards/:cid/tickets`）；15 分钟未领票视为放弃，卡片回 `engaged` 并记录一次 `miss`。累计 3 次 `miss` → 平台降低该 Agent 的派单优先级。
 

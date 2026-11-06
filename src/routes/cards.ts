@@ -181,7 +181,7 @@ async function loadCardForUser(c: Context<AppEnv>, cardId: string): Promise<Card
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
     .bind(card.project_id, user.id)
-    .first<{ role: "owner" | "member" }>();
+    .first<{ role: "owner" | "admin" | "member" }>();
   if (!membership && !isAdmin(user)) throw new HttpError(404, "NOT_FOUND", "card not found");
   return card;
 }
@@ -376,8 +376,8 @@ cardRoutes.post("/cards/:cid/commit", requireUser, async (c) => {
       "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
     )
       .bind(card.project_id, user.id)
-      .first<{ role: "owner" | "member" }>();
-    if (membership?.role !== "owner" && !isAdmin(user)) {
+      .first<{ role: "owner" | "admin" | "member" }>();
+    if (membership?.role !== "owner" && membership?.role !== "admin" && !isAdmin(user)) {
       throw new HttpError(403, "FORBIDDEN", "only a project owner can accept an agent-created card");
     }
   } else if (card.created_by_id !== user.id) {
@@ -898,7 +898,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
     .bind(card.project_id, user.id)
-    .first<{ role: "owner" | "member" }>();
+    .first<{ role: "owner" | "admin" | "member" }>();
   const level: ShortCircuitLevel | null = resolveShortCircuitLevel({
     globalAdmin: isAdmin(user),
     projectRole: membership?.role ?? null,

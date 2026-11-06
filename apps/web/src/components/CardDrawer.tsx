@@ -94,7 +94,10 @@ export function CardDrawer({
     [card?.criteria_json],
   );
 
-  const canShortCircuit = currentUser.role === "admin" || projectRole === "owner";
+  const canShortCircuit =
+    currentUser.role === "admin" ||
+    projectRole === "owner" ||
+    projectRole === "admin";
   const shortCircuitReady = shortCircuitReason.trim().length >= 8;
   const shortCircuitAgentsQuery = useQuery({
     queryKey: ["project-agents", projectId],
@@ -1124,9 +1127,9 @@ export function CardDrawer({
                         <div className="dialog-title">
                           {t("shortCircuit.title")}
                           <span className="badge badge-neutral">
-                            {currentUser.role === "admin"
-                              ? t("shortCircuit.levelInstance")
-                              : t("shortCircuit.levelProject")}
+                            {projectRole === "owner" || projectRole === "admin"
+                              ? t("shortCircuit.levelProject")
+                              : t("shortCircuit.levelInstance")}
                           </span>
                         </div>
                         <div className="field-hint">{t("shortCircuit.hint")}</div>

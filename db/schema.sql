@@ -92,13 +92,13 @@ CREATE TABLE projects (
 CREATE TABLE project_members (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role       TEXT NOT NULL CHECK (role IN ('owner','member')),
+  role       TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
   added_by   TEXT NOT NULL REFERENCES users(id),
   added_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (project_id, user_id)
 );
 CREATE INDEX idx_members_user ON project_members(user_id);
--- 每个项目只有一个 owner；变更走转让。
+-- 每个项目只有一个 owner；变更走转让。admin 是可委托的项目管理员，不占 owner 唯一位。
 CREATE UNIQUE INDEX uq_project_single_owner ON project_members(project_id) WHERE role = 'owner';
 
 CREATE TABLE project_join_requests (

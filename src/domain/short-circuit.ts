@@ -1,7 +1,7 @@
 import { HttpError } from "../lib/http-error";
 import type { CardRow } from "../types";
 
-export type ShortCircuitLevel = "project_owner" | "instance_admin";
+export type ShortCircuitLevel = "project_owner" | "project_admin" | "instance_admin";
 export type ShortCircuitAction = "engage" | "verify" | "cancel" | "release" | "reset";
 export type ShortCircuitBypass =
   | "proposal"
@@ -14,18 +14,18 @@ export type ShortCircuitBypass =
 
 export interface ShortCircuitActor {
   globalAdmin: boolean;
-  projectRole: "owner" | "member" | null;
+  projectRole: "owner" | "admin" | "member" | null;
 }
 
 /**
- * The effective level is the highest applicable one. An instance admin who is
- * also an explicit project member still acts as an instance admin; a project
- * owner acts only inside their own project (scope is enforced by the caller's
- * project lookup).
+ * The effective level is the narrowest applicable scope. An explicit project
+ * owner/admin acts as the project-level role inside that project; instance
+ * admins keep instance-wide reach and also cover projects they do not belong to.
  */
 export function resolveShortCircuitLevel(actor: ShortCircuitActor): ShortCircuitLevel | null {
-  if (actor.globalAdmin) return "instance_admin";
   if (actor.projectRole === "owner") return "project_owner";
+  if (actor.projectRole === "admin") return "project_admin";
+  if (actor.globalAdmin) return "instance_admin";
   return null;
 }
 
@@ -36,7 +36,7 @@ export function assertShortCircuitLevel(
     throw new HttpError(
       403,
       "ADMIN_PRIVILEGED_FORBIDDEN",
-      "short-circuit requires a project owner or an instance admin",
+      "short-circuit requires a project owner, project admin, or instance admin",
     );
   }
 }

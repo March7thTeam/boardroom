@@ -1,4 +1,4 @@
-export type ProjectRole = "owner" | "member";
+export type ProjectRole = "owner" | "admin" | "member";
 
 export type ProjectSummary = {
   id: string;

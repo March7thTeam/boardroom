@@ -45,5 +45,21 @@
   "vars": {
     "ENVIRONMENT": "production",
     "AUTH_MODE": "session"
+  },
+  // Workers Builds uses `wrangler preview` for non-production branches.
+  // D1 and TOKEN_PEPPER must be configured separately in Previews Base.
+  "previews": {
+    "vars": {
+      "ENVIRONMENT": "production",
+      "AUTH_MODE": "session"
+    },
+    "durable_objects": {
+      "bindings": [
+        {
+          "name": "BOARD_DO",
+          "class_name": "BoardDO"
+        }
+      ]
+    }
   }
 }

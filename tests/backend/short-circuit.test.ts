@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../src/context";
 import type { CardRow, Env } from "../../src/types";
 import { cardRoutes } from "../../src/routes/cards";
+import { projectRoutes } from "../../src/routes/projects";
 import { agentApiRoutes } from "../../src/routes/agent-api";
 import { publishOutboxEvent, reconcileEvents, type OutboxRow } from "../../src/lib/event-store";
 import { formatAgentToken } from "../../src/lib/tokens";
@@ -18,9 +19,11 @@ const { readFileSync, readdirSync } = builtin<{
 const P = "prj_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const OWNER = "u_owner";
 const MEMBER = "u_member";
+const PROJECT_ADMIN = "u_padmin";
 const ADMIN = "u_admin";
 const OWNER_EMAIL = "owner@example.test";
 const MEMBER_EMAIL = "member@example.test";
+const PROJECT_ADMIN_EMAIL = "padmin@example.test";
 const ADMIN_EMAIL = "admin@example.test";
 const BOT = `${P}:bot`;
 const PEER = `${P}:peer`;
@@ -39,6 +42,9 @@ interface ApiBody {
   was_paused?: boolean;
   round?: number;
   contract_state?: string;
+  member?: { id: string; role: string };
+  owner?: { id: string; role: string };
+  previous_owner_id?: string | null;
   short_circuit?: { level: string; action: string; reason: string; bypassed: string[] };
   session_id?: string;
   proposal_id?: string;
@@ -68,13 +74,15 @@ async function fixture() {
     INSERT INTO users(id,email,role) VALUES
       ('${OWNER}','${OWNER_EMAIL}','member'),
       ('${MEMBER}','${MEMBER_EMAIL}','member'),
+      ('${PROJECT_ADMIN}','${PROJECT_ADMIN_EMAIL}','member'),
       ('${ADMIN}','${ADMIN_EMAIL}','admin');
     INSERT INTO projects(id,slug,name,created_by,exec_targets_json) VALUES
       ('${P}','short-circuit','Short Circuit','${OWNER}',
        '[{"provider":"github_actions","owner":"acme","repo":"demo","workflows":["ci.yml"]}]');
     INSERT INTO project_members(project_id,user_id,role,added_by) VALUES
       ('${P}','${OWNER}','owner','${OWNER}'),
-      ('${P}','${MEMBER}','member','${OWNER}');
+      ('${P}','${MEMBER}','member','${OWNER}'),
+      ('${P}','${PROJECT_ADMIN}','admin','${OWNER}');
     INSERT INTO agents(id,slug) VALUES ('${BOT_AGENT_ID}','bot'),('${PEER_AGENT_ID}','peer');
     INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES
       ('${BOT_AGENT_ID}','${P}','active','bot'),
@@ -120,6 +128,7 @@ async function fixture() {
     ),
   );
   app.route("/api/v1", cardRoutes);
+  app.route("/api/v1", projectRoutes);
   app.route("/agent", agentApiRoutes);
 
   async function human(
@@ -339,6 +348,67 @@ describe("admin short-circuit", () => {
     );
     expect(response.status).toBe(403);
     expect(response.body.error?.code).toBe("ADMIN_PRIVILEGED_FORBIDDEN");
+  });
+
+  it("lets a project admin act without being an instance admin", async () => {
+    const f = await fixture();
+    const cid = await f.createCard();
+    const response = await f.call(
+      `/api/v1/cards/${cid}/short-circuit`,
+      { action: "engage", reason: "project admin governance", assignee_agent_id: BOT },
+      PROJECT_ADMIN_EMAIL,
+    );
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body.level).toBe("project_admin");
+    expect(response.body.card?.status).toBe("engaged");
+  });
+
+  it("does not let a project admin manage project members", async () => {
+    const f = await fixture();
+    const response = await f.call(
+      `/api/v1/projects/${P}/members/${MEMBER}`,
+      { role: "admin" },
+      PROJECT_ADMIN_EMAIL,
+      "PATCH",
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("lets the owner grant and revoke the project admin role", async () => {
+    const f = await fixture();
+    const granted = await f.call(
+      `/api/v1/projects/${P}/members/${MEMBER}`,
+      { role: "admin" },
+      OWNER_EMAIL,
+      "PATCH",
+    );
+    expect(granted.status, JSON.stringify(granted.body)).toBe(200);
+    expect(granted.body.member?.role).toBe("admin");
+
+    const revoked = await f.call(
+      `/api/v1/projects/${P}/members/${MEMBER}`,
+      { role: "member" },
+      OWNER_EMAIL,
+      "PATCH",
+    );
+    expect(revoked.status, JSON.stringify(revoked.body)).toBe(200);
+    expect(revoked.body.member?.role).toBe("member");
+  });
+
+  it("lets the owner transfer ownership to a project admin", async () => {
+    const f = await fixture();
+    const response = await f.call(
+      `/api/v1/projects/${P}/owner`,
+      { user_id: PROJECT_ADMIN },
+      OWNER_EMAIL,
+    );
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.owner?.role).toBe("owner");
+    expect(response.body.previous_owner_id).toBe(OWNER);
+    const previous = f.db.sqlite
+      .prepare("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
+      .get(P, OWNER) as { role: string };
+    expect(previous.role).toBe("member");
   });
 
   it("lets an instance admin act on a project without membership", async () => {

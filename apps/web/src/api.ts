@@ -324,10 +324,10 @@ export const api = {
   ): Promise<
     {
       card: Card;
-      level: "project_owner" | "instance_admin";
+      level: "project_owner" | "project_admin" | "instance_admin";
       action: "engage" | "verify" | "cancel" | "release" | "reset";
       short_circuit: {
-        level: "project_owner" | "instance_admin";
+        level: "project_owner" | "project_admin" | "instance_admin";
         action: "engage" | "verify" | "cancel" | "release" | "reset";
         reason: string;
         bypassed: string[];
@@ -424,7 +424,7 @@ export const api = {
 
   addProjectMember(
     projectId: string,
-    input: { email: string; role?: "member" },
+    input: { email: string; role?: "admin" | "member" },
   ): Promise<{ member: ProjectMember }> {
     return request<{ member: ProjectMember }>(
       `/projects/${encodeURIComponent(projectId)}/members`,
@@ -435,7 +435,7 @@ export const api = {
   updateProjectMemberRole(
     projectId: string,
     userId: string,
-    role: "owner" | "member",
+    role: "owner" | "admin" | "member",
   ): Promise<{ member: ProjectMember }> {
     return request<{ member: ProjectMember }>(
       `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,

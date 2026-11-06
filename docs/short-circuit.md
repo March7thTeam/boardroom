@@ -13,11 +13,12 @@
 
 | 名称 | 判定来源 | 作用域 | 说明 |
 |---|---|---|---|
-| 项目级管理员 | `project_members.role = 'owner'` | 仅该卡片所属项目 | 每个项目只有一个 owner（`uq_project_single_owner`）；等价于现有「项目所有者」 |
-| 实例级管理员 | `users.role = 'admin'` | 实例内全部未归档项目 | 与 `requireProjectMember` 的隐式 owner 兜底一致；非成员项目也可短路 |
+| 项目所有者 | `project_members.role = 'owner'` | 仅该卡片所属项目 | 每个项目只有一个 owner（`uq_project_single_owner`） |
+| 项目管理员 | `project_members.role = 'admin'` | 仅该卡片所属项目 | owner 在参与者面板授予；可短路，不能管理成员 |
+| 实例级管理员 | `users.role = 'admin'` | 实例内全部未归档项目 | 非成员项目也可短路 |
 | 普通项目成员 | `project_members.role = 'member'` | 无 | 不能短路，只能走常规协商/验收/干预 |
 
-判定顺序：**实例级优先于项目级**。实例管理员即使在某项目里是显式 `member`，仍按实例级处理；响应里的 `level` 会标明实际生效的层级。
+判定顺序：**显式项目角色优先于实例级**。项目 owner / admin 在本项目内按项目级处理；实例管理员在非成员项目按实例级处理。响应里的 `level` 会标明实际生效的层级（`project_owner` / `project_admin` / `instance_admin`）。
 
 ## 2. 场景与动作矩阵
 
@@ -113,7 +114,7 @@ Cookie: <session>
 
 | HTTP | code | 场景 |
 |---|---|---|
-| 403 | `ADMIN_PRIVILEGED_FORBIDDEN` | 非项目 owner、非实例 admin |
+| 403 | `ADMIN_PRIVILEGED_FORBIDDEN` | 非项目 owner/admin、非实例 admin |
 | 409 | `CARD_PAUSED` | 除 `cancel` 外，卡片已暂停 |
 | 409 | `ADMIN_ACTION_STATE` | 状态不满足该 action（`details.from` / `details.allowed`） |
 | 409 | `NEGOTIATION_OPEN` | `engage` 时当前轮次已有 open session；应先走正常 `commit` |
@@ -186,7 +187,7 @@ Cookie: <session>
 
 ## 7. 前端
 
-卡片抽屉在卡片未关闭时展示「管理员操作」区域，仅对项目 owner 或实例 admin 可见：
+卡片抽屉在卡片未关闭时展示「管理员操作」区域，仅对项目 owner/admin 或实例 admin 可见：
 
 - `open`：选择项目内 active Agent + 理由 → `engage`；可 `cancel`。
 - `engaged`：`reset`；可 `cancel`。

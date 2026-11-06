@@ -15,7 +15,7 @@ export type AppEnv = {
      */
     agentCredentialProject: string;
     project: ProjectRow;
-    projectRole: "owner" | "member";
+    projectRole: "owner" | "admin" | "member";
     /** `admin` when the caller reaches the project only as an instance admin. */
     projectAccess: "member" | "admin";
     locale: Locale;
