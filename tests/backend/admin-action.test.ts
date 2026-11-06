@@ -45,7 +45,7 @@ interface ApiBody {
   member?: { id: string; role: string };
   owner?: { id: string; role: string };
   previous_owner_id?: string | null;
-  short_circuit?: { level: string; action: string; reason: string; bypassed: string[] };
+  admin_action?: { level: string; action: string; reason: string; skipped_gates: string[] };
   session_id?: string;
   proposal_id?: string;
   contract_id?: string;
@@ -77,7 +77,7 @@ async function fixture() {
       ('${PROJECT_ADMIN}','${PROJECT_ADMIN_EMAIL}','member'),
       ('${ADMIN}','${ADMIN_EMAIL}','admin');
     INSERT INTO projects(id,slug,name,created_by,exec_targets_json) VALUES
-      ('${P}','short-circuit','Short Circuit','${OWNER}',
+      ('${P}','admin-action','Admin Action','${OWNER}',
        '[{"provider":"github_actions","owner":"acme","repo":"demo","workflows":["ci.yml"]}]');
     INSERT INTO project_members(project_id,user_id,role,added_by) VALUES
       ('${P}','${OWNER}','owner','${OWNER}'),
@@ -287,19 +287,19 @@ async function fixture() {
   };
 }
 
-describe("admin short-circuit", () => {
+describe("admin action", () => {
   it("lets a project owner engage an open card without a proposal and issue a ticket", async () => {
     const f = await fixture();
     const cid = await f.createCard();
 
-    const response = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+    const response = await f.call(`/api/v1/cards/${cid}/admin-action`, {
       action: "engage",
       reason: "no online peer to propose",
       assignee_agent_id: BOT,
     });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
     expect(response.body.level).toBe("project_owner");
-    expect(response.body.short_circuit?.bypassed).toEqual(["proposal", "agent_acceptance"]);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["proposal", "agent_acceptance"]);
     expect(response.body.card?.status).toBe("engaged");
     expect(response.body.card?.assignee_agent_id).toBe(BOT_AGENT_ID);
 
@@ -317,7 +317,7 @@ describe("admin short-circuit", () => {
     const event = f.db.sqlite.prepare(
       "SELECT event_type, payload_json FROM card_events WHERE card_id = ? ORDER BY seq DESC LIMIT 1",
     ).get(cid) as Record<string, unknown>;
-    expect(event.event_type).toBe("card.short_circuited");
+    expect(event.event_type).toBe("card.admin_action");
     const payload = JSON.parse(event.payload_json as string) as Record<string, unknown>;
     expect(payload).toMatchObject({
       action: "engage",
@@ -328,7 +328,7 @@ describe("admin short-circuit", () => {
       session_id: response.body.session_id,
       contract_id: response.body.contract_id,
     });
-    expect(payload.bypassed).toEqual(["proposal", "agent_acceptance"]);
+    expect(payload.skipped_gates).toEqual(["proposal", "agent_acceptance"]);
 
     const audit = f.db.sqlite.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE card_id = ?").get(cid) as { count: number };
     expect(audit.count).toBeGreaterThan(0);
@@ -342,7 +342,7 @@ describe("admin short-circuit", () => {
     const f = await fixture();
     const cid = await f.createCard();
     const response = await f.call(
-      `/api/v1/cards/${cid}/short-circuit`,
+      `/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "member should not pass", assignee_agent_id: BOT },
       MEMBER_EMAIL,
     );
@@ -354,7 +354,7 @@ describe("admin short-circuit", () => {
     const f = await fixture();
     const cid = await f.createCard();
     const response = await f.call(
-      `/api/v1/cards/${cid}/short-circuit`,
+      `/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "project admin governance", assignee_agent_id: BOT },
       PROJECT_ADMIN_EMAIL,
     );
@@ -415,7 +415,7 @@ describe("admin short-circuit", () => {
     const f = await fixture();
     const cid = await f.createCard();
     const response = await f.call(
-      `/api/v1/cards/${cid}/short-circuit`,
+      `/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "instance-wide governance", assignee_agent_id: BOT },
       ADMIN_EMAIL,
     );
@@ -424,11 +424,11 @@ describe("admin short-circuit", () => {
     expect(response.body.card?.status).toBe("engaged");
   });
 
-  it("refuses to bypass an open negotiation session", async () => {
+  it("refuses to engage over an open negotiation session", async () => {
     const f = await fixture();
     const cid = await f.createCard();
     f.seedSession(cid, "open");
-    const response = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+    const response = await f.call(`/api/v1/cards/${cid}/admin-action`, {
       action: "engage",
       reason: "should use normal commit",
       assignee_agent_id: BOT,
@@ -446,7 +446,7 @@ describe("admin short-circuit", () => {
       createdById: BOT_AGENT_ID,
       requesterAgentId: BOT_AGENT_ID,
     });
-    const response = await f.call("/api/v1/cards/c_agent_owned/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_agent_owned/admin-action", {
       action: "engage",
       reason: "self assignment must be blocked",
       assignee_agent_id: BOT,
@@ -455,10 +455,10 @@ describe("admin short-circuit", () => {
     expect(response.body.error?.code).toBe("SELF_ASSIGNMENT");
   });
 
-  it("closes a review card with zero evidence and records the bypass", async () => {
+  it("closes a review card with zero evidence and records the skipped gate", async () => {
     const f = await fixture();
     const contractId = f.seedReviewCard({ id: "c_no_evidence", proposerAgentId: BOT_AGENT_ID });
-    const response = await f.call("/api/v1/cards/c_no_evidence/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_no_evidence/admin-action", {
       action: "verify",
       reason: "CI green but artifacts were omitted",
       verdict: "pass",
@@ -466,7 +466,7 @@ describe("admin short-circuit", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect(response.body.outcome).toBe("done");
     expect(response.body.evidence_count).toBe(0);
-    expect(response.body.short_circuit?.bypassed).toEqual(["evidence_required"]);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["evidence_required"]);
     expect(response.body.card?.status).toBe("closed");
     expect(response.body.card?.outcome).toBe("done");
 
@@ -480,24 +480,24 @@ describe("admin short-circuit", () => {
       action: "verify",
       outcome: "done",
       evidence_count: 0,
-      bypassed: ["evidence_required"],
+      skipped_gates: ["evidence_required"],
     });
   });
 
-  it("records a proposer-verifier conflict bypass even with evidence", async () => {
+  it("records a proposer-verifier conflict skip even with evidence", async () => {
     const f = await fixture();
     f.seedReviewCard({
       id: "c_conflict",
       proposerUserId: OWNER,
       evidence: true,
     });
-    const response = await f.call("/api/v1/cards/c_conflict/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_conflict/admin-action", {
       action: "verify",
       reason: "owner is the only available verifier",
       verdict: "pass",
     });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
-    expect(response.body.short_circuit?.bypassed).toEqual(["verifier_conflict"]);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["verifier_conflict"]);
     const event = f.db.sqlite.prepare(
       "SELECT payload_json FROM card_events WHERE card_id = ? ORDER BY seq DESC LIMIT 1",
     ).get("c_conflict") as { payload_json: string };
@@ -505,21 +505,21 @@ describe("admin short-circuit", () => {
     expect(payload.verifier_conflict).toBe("PROPOSER_IS_VERIFIER");
   });
 
-  it("short-circuits a rejection and breaches the active contract", async () => {
+  it("records an admin rejection and breaches the active contract", async () => {
     const f = await fixture();
     const contractId = f.seedReviewCard({
       id: "c_reject",
       proposerAgentId: BOT_AGENT_ID,
       evidence: true,
     });
-    const response = await f.call("/api/v1/cards/c_reject/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_reject/admin-action", {
       action: "verify",
       reason: "evidence does not match the delivered scope",
       verdict: "reject",
     });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect(response.body.outcome).toBe("rejected");
-    expect(response.body.short_circuit?.bypassed).toEqual([]);
+    expect(response.body.admin_action?.skipped_gates).toEqual([]);
     const contract = f.db.sqlite.prepare("SELECT state FROM contracts WHERE id = ?").get(contractId) as { state: string };
     expect(contract.state).toBe("breached");
   });
@@ -527,7 +527,7 @@ describe("admin short-circuit", () => {
   it("rejects a paused card and the wrong state", async () => {
     const f = await fixture();
     f.insertCard({ id: "c_paused", status: "open", pausedAt: "2026-01-01T00:00:00.000Z" });
-    const paused = await f.call("/api/v1/cards/c_paused/short-circuit", {
+    const paused = await f.call("/api/v1/cards/c_paused/admin-action", {
       action: "engage",
       reason: "paused cards stay paused",
       assignee_agent_id: BOT,
@@ -536,7 +536,7 @@ describe("admin short-circuit", () => {
     expect(paused.body.error?.code).toBe("CARD_PAUSED");
 
     const cid = await f.createCard();
-    const wrongState = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+    const wrongState = await f.call(`/api/v1/cards/${cid}/admin-action`, {
       action: "verify",
       reason: "open card cannot be verified",
       verdict: "pass",
@@ -550,13 +550,13 @@ describe("admin short-circuit", () => {
     const cid = await f.createCard();
     const body = {
       action: "engage",
-      message_id: "short-circuit-message-1",
+      message_id: "admin-action-message-1",
       reason: "idempotent governance action",
       assignee_agent_id: BOT,
     };
-    const first = await f.call(`/api/v1/cards/${cid}/short-circuit`, body);
+    const first = await f.call(`/api/v1/cards/${cid}/admin-action`, body);
     expect(first.status, JSON.stringify(first.body)).toBe(201);
-    const second = await f.call(`/api/v1/cards/${cid}/short-circuit`, body);
+    const second = await f.call(`/api/v1/cards/${cid}/admin-action`, body);
     expect(second.status).toBe(200);
     expect(second.body.duplicate).toBe(true);
     const contracts = f.db.sqlite.prepare("SELECT COUNT(*) AS count FROM contracts WHERE card_id = ?").get(cid) as { count: number };
@@ -578,7 +578,7 @@ describe("admin short-circuit", () => {
     });
     f.seedAttempt("c_cancel", contractId, "running");
 
-    const response = await f.call("/api/v1/cards/c_cancel/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_cancel/admin-action", {
       action: "cancel",
       reason: "abusive card; emergency stop",
     });
@@ -631,14 +631,14 @@ describe("admin short-circuit", () => {
     });
     f.seedAttempt("c_release", contractId, "issued");
 
-    const response = await f.call("/api/v1/cards/c_release/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_release/admin-action", {
       action: "release",
       reason: "execution ticket is stuck; return to engaged",
     });
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     expect(response.body.card?.status).toBe("engaged");
     expect(response.body.attempts_abandoned).toBe(1);
-    expect(response.body.short_circuit?.bypassed).toEqual(["attempt_lease"]);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["attempt_lease"]);
 
     const card = f.db.sqlite.prepare(
       "SELECT status, lease_owner, lease_expires_at FROM cards WHERE id = 'c_release'",
@@ -662,7 +662,7 @@ describe("admin short-circuit", () => {
       evidence: true,
     });
 
-    const response = await f.call("/api/v1/cards/c_reset/short-circuit", {
+    const response = await f.call("/api/v1/cards/c_reset/admin-action", {
       action: "reset",
       reason: "platform bug left the card in review",
     });
@@ -670,7 +670,7 @@ describe("admin short-circuit", () => {
     expect(response.body.card?.status).toBe("open");
     expect(response.body.card?.round).toBe(2);
     expect(response.body.round).toBe(2);
-    expect(response.body.short_circuit?.bypassed).toEqual(["active_work"]);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["active_work"]);
 
     const card = f.db.sqlite.prepare(
       "SELECT status, round, assignee_agent_id, verifier_id, evidence_hash FROM cards WHERE id = 'c_reset'",
@@ -696,14 +696,14 @@ describe("admin short-circuit", () => {
     const f = await fixture();
     const cid = await f.createCard();
 
-    const release = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+    const release = await f.call(`/api/v1/cards/${cid}/admin-action`, {
       action: "release",
       reason: "open cards have no ticket to release",
     });
     expect(release.status).toBe(409);
     expect(release.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
-    const reset = await f.call(`/api/v1/cards/${cid}/short-circuit`, {
+    const reset = await f.call(`/api/v1/cards/${cid}/admin-action`, {
       action: "reset",
       reason: "open cards are already open",
     });
@@ -711,7 +711,7 @@ describe("admin short-circuit", () => {
     expect(reset.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
     const memberCancel = await f.call(
-      `/api/v1/cards/${cid}/short-circuit`,
+      `/api/v1/cards/${cid}/admin-action`,
       { action: "cancel", reason: "member cannot stop the card" },
       MEMBER_EMAIL,
     );

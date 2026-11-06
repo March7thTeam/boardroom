@@ -1,9 +1,9 @@
 import { HttpError } from "../lib/http-error";
 import type { CardRow } from "../types";
 
-export type ShortCircuitLevel = "project_owner" | "project_admin" | "instance_admin";
-export type ShortCircuitAction = "engage" | "verify" | "cancel" | "release" | "reset";
-export type ShortCircuitBypass =
+export type AdminActionLevel = "project_owner" | "project_admin" | "instance_admin";
+export type AdminActionKind = "engage" | "verify" | "cancel" | "release" | "reset";
+export type AdminActionSkippedGate =
   | "proposal"
   | "agent_acceptance"
   | "evidence_required"
@@ -12,7 +12,7 @@ export type ShortCircuitBypass =
   | "attempt_lease"
   | "round_limit";
 
-export interface ShortCircuitActor {
+export interface AdminActionActor {
   globalAdmin: boolean;
   projectRole: "owner" | "admin" | "member" | null;
 }
@@ -22,27 +22,27 @@ export interface ShortCircuitActor {
  * owner/admin acts as the project-level role inside that project; instance
  * admins keep instance-wide reach and also cover projects they do not belong to.
  */
-export function resolveShortCircuitLevel(actor: ShortCircuitActor): ShortCircuitLevel | null {
+export function resolveAdminActionLevel(actor: AdminActionActor): AdminActionLevel | null {
   if (actor.projectRole === "owner") return "project_owner";
   if (actor.projectRole === "admin") return "project_admin";
   if (actor.globalAdmin) return "instance_admin";
   return null;
 }
 
-export function assertShortCircuitLevel(
-  level: ShortCircuitLevel | null,
-): asserts level is ShortCircuitLevel {
+export function assertAdminActionLevel(
+  level: AdminActionLevel | null,
+): asserts level is AdminActionLevel {
   if (!level) {
     throw new HttpError(
       403,
       "ADMIN_PRIVILEGED_FORBIDDEN",
-      "short-circuit requires a project owner, project admin, or instance admin",
+      "admin action requires a project owner, project admin, or instance admin",
     );
   }
 }
 
 /**
- * Short-circuit is a bounded governance escape hatch, not a generic "set any
+ * Admin actions are a bounded governance escape hatch, not a generic "set any
  * status" endpoint. Each action has an explicit from/to contract:
  *
  * - engage  open -> engaged        skip proposal + agent acceptance
@@ -51,8 +51,8 @@ export function assertShortCircuitLevel(
  * - release running -> engaged     abandon ticket + clear lease
  * - reset   engaged|running|review -> open       platform-bug recovery
  */
-export function assertShortCircuitState(action: ShortCircuitAction, card: CardRow): void {
-  const allowed: Record<ShortCircuitAction, readonly string[]> = {
+export function assertAdminActionState(action: AdminActionKind, card: CardRow): void {
+  const allowed: Record<AdminActionKind, readonly string[]> = {
     engage: ["open"],
     verify: ["review"],
     cancel: ["open", "engaged", "running", "review"],
@@ -68,7 +68,7 @@ export function assertShortCircuitState(action: ShortCircuitAction, card: CardRo
     throw new HttpError(
       409,
       "ADMIN_ACTION_STATE",
-      `short-circuit ${action} does not allow a card in ${card.status}`,
+      `admin action ${action} does not allow a card in ${card.status}`,
       { action, from: card.status, allowed: allowed[action] },
     );
   }
@@ -77,7 +77,7 @@ export function assertShortCircuitState(action: ShortCircuitAction, card: CardRo
 export interface DirectEngageTermsInput {
   card: CardRow;
   assigneeAgentId: string;
-  level: ShortCircuitLevel;
+  level: AdminActionLevel;
   actorUserId: string;
   reason: string;
   now: string;
@@ -102,7 +102,7 @@ export function buildDirectEngageTerms(input: DirectEngageTermsInput): Record<st
     title: input.card.title,
     assignee_agent_id: input.assigneeAgentId,
     criteria,
-    short_circuit: {
+    admin_action: {
       level: input.level,
       action: "engage",
       by: input.actorUserId,
@@ -113,13 +113,13 @@ export function buildDirectEngageTerms(input: DirectEngageTermsInput): Record<st
   };
 }
 
-export function verifyBypasses(input: {
+export function collectSkippedGates(input: {
   verdict: "pass" | "reject";
   evidenceCount: number;
   verifierConflict: string | null;
-}): ShortCircuitBypass[] {
-  const bypassed: ShortCircuitBypass[] = [];
-  if (input.verdict === "pass" && input.evidenceCount === 0) bypassed.push("evidence_required");
-  if (input.verifierConflict) bypassed.push("verifier_conflict");
-  return bypassed;
+}): AdminActionSkippedGate[] {
+  const skipped: AdminActionSkippedGate[] = [];
+  if (input.verdict === "pass" && input.evidenceCount === 0) skipped.push("evidence_required");
+  if (input.verifierConflict) skipped.push("verifier_conflict");
+  return skipped;
 }

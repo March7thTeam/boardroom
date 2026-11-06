@@ -6,13 +6,13 @@ import { assertTransition } from "../domain/state-machine";
 import { buildContractReceipt, termsHash } from "../domain/negotiation";
 import { guardedCardWrite, retireCardWork } from "../domain/execution";
 import {
-  assertShortCircuitLevel,
-  assertShortCircuitState,
+  assertAdminActionLevel,
+  assertAdminActionState,
   buildDirectEngageTerms,
-  resolveShortCircuitLevel,
-  verifyBypasses,
-  type ShortCircuitLevel,
-} from "../domain/short-circuit";
+  collectSkippedGates,
+  resolveAdminActionLevel,
+  type AdminActionLevel,
+} from "../domain/admin-action";
 import { resolveProjectAgentReference } from "../domain/agent-projects";
 import { verifierConflict } from "../domain/verification";
 import { HttpError } from "../lib/http-error";
@@ -117,7 +117,7 @@ const verifyReasonsSchema = z
   .max(100)
   .optional();
 
-const shortCircuitSchema = z.discriminatedUnion("action", [
+const adminActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("engage"),
     message_id: z.string().min(8).max(80).optional(),
@@ -883,34 +883,34 @@ cardRoutes.post("/cards/:cid/intervene", requireUser, async (c) => {
 });
 
 /**
- * Governance short-circuit. Two levels share the same two actions; the scope
+ * Governance admin action. Two levels share the same action set; the scope
  * differs: a project owner may act only inside the looked-up project, while an
  * instance admin may act on any unarchived project (loadCardForUser already
- * grants that access). Every branch writes one card.short_circuited event and
+ * grants that access). Every branch writes one card.admin_action event and
  * the usual card CAS, so seq/audit/SSE invariants are unchanged.
  */
-cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
+cardRoutes.post("/cards/:cid/admin-action", requireUser, async (c) => {
   const user = c.get("user");
   const card = await loadCardForUser(c, c.req.param("cid"));
-  const body = await parseBody(c, shortCircuitSchema);
+  const body = await parseBody(c, adminActionSchema);
 
   const membership = await c.env.DB.prepare(
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
     .bind(card.project_id, user.id)
     .first<{ role: "owner" | "admin" | "member" }>();
-  const level: ShortCircuitLevel | null = resolveShortCircuitLevel({
+  const level: AdminActionLevel | null = resolveAdminActionLevel({
     globalAdmin: isAdmin(user),
     projectRole: membership?.role ?? null,
   });
-  assertShortCircuitLevel(level);
+  assertAdminActionLevel(level);
 
   if (body.message_id) {
     const duplicate = await findExistingCardMessage(c, card.id, body.message_id);
     if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
   }
 
-  assertShortCircuitState(body.action, card);
+  assertAdminActionState(body.action, card);
 
   const now = nowIso();
 
@@ -977,7 +977,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     const proposalId = newId("p");
     const contractId = newId("ct");
     const proofJson = JSON.stringify({
-      type: "admin_short_circuit",
+      type: "admin_action",
       level,
       by_type: "user",
       by_id: user.id,
@@ -985,7 +985,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
       accepted_at: now,
       synthetic: true,
     });
-    const bypassed = ["proposal", "agent_acceptance"] as const;
+    const skippedGates = ["proposal", "agent_acceptance"] as const;
 
     const mutations = [
       guardedCardWrite(
@@ -1032,13 +1032,13 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
       c,
       card,
-      "card.short_circuited",
+      "card.admin_action",
       {
         action: "engage",
         level,
         reason: body.reason,
-        bypassed,
-        short_circuit: { level, action: "engage", reason: body.reason, bypassed },
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "engage", reason: body.reason, skipped_gates: skippedGates },
         from: "open",
         to: "engaged",
         synthetic: true,
@@ -1050,14 +1050,14 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
       },
       body.message_id,
       mutations,
-      { level, action: "engage", session_id: sessionId, proposal_id: proposalId, contract_id: contractId, terms_hash: hash, bypassed },
+      { level, action: "engage", session_id: sessionId, proposal_id: proposalId, contract_id: contractId, terms_hash: hash, skipped_gates: skippedGates },
     );
     return c.json(
       {
         card: updated ?? card,
         level,
         action: "engage",
-        short_circuit: { level, action: "engage", reason: body.reason, bypassed },
+        admin_action: { level, action: "engage", reason: body.reason, skipped_gates: skippedGates },
         session_id: sessionId,
         proposal_id: proposalId,
         contract_id: contractId,
@@ -1088,19 +1088,19 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
               lease_owner = NULL, lease_expires_at = NULL, paused_at = NULL, updated_at = ?1
         WHERE id = ?2 AND version = ?3 AND status <> 'closed'`,
     ).bind(now, card.id, card.version);
-    const bypassed = ["active_work"] as const;
+    const skippedGates = ["active_work"] as const;
     const attemptsAbandoned = attempts.results.length;
     const wasPaused = Boolean(card.paused_at);
     const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
       c,
       card,
-      "card.short_circuited",
+      "card.admin_action",
       {
         action: "cancel",
         level,
         reason: body.reason,
-        bypassed,
-        short_circuit: { level, action: "cancel", reason: body.reason, bypassed },
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "cancel", reason: body.reason, skipped_gates: skippedGates },
         from: card.status,
         to: "closed",
         outcome: "cancelled",
@@ -1111,14 +1111,14 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
       },
       body.message_id,
       [...related, cardWrite],
-      { level, action: "cancel", from: card.status, to: "closed", outcome: "cancelled", attempts_abandoned: attemptsAbandoned, bypassed },
+      { level, action: "cancel", from: card.status, to: "closed", outcome: "cancelled", attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
     );
     return c.json(
       {
         card: updated ?? card,
         level,
         action: "cancel",
-        short_circuit: { level, action: "cancel", reason: body.reason, bypassed },
+        admin_action: { level, action: "cancel", reason: body.reason, skipped_gates: skippedGates },
         outcome: "cancelled",
         attempts_abandoned: attemptsAbandoned,
         was_paused: wasPaused,
@@ -1156,18 +1156,18 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
               lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
         WHERE id = ?2 AND version = ?3 AND status = 'running' AND paused_at IS NULL`,
     ).bind(now, card.id, card.version);
-    const bypassed = ["attempt_lease"] as const;
+    const skippedGates = ["attempt_lease"] as const;
     const attemptsAbandoned = attempts.results.length;
     const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
       c,
       card,
-      "card.short_circuited",
+      "card.admin_action",
       {
         action: "release",
         level,
         reason: body.reason,
-        bypassed,
-        short_circuit: { level, action: "release", reason: body.reason, bypassed },
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "release", reason: body.reason, skipped_gates: skippedGates },
         from: "running",
         to: "engaged",
         attempt_ids: attempts.results.map((attempt) => attempt.id),
@@ -1177,14 +1177,14 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
       },
       body.message_id,
       [attemptWrite, cardWrite],
-      { level, action: "release", from: "running", to: "engaged", attempts_abandoned: attemptsAbandoned, bypassed },
+      { level, action: "release", from: "running", to: "engaged", attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
     );
     return c.json(
       {
         card: updated ?? card,
         level,
         action: "release",
-        short_circuit: { level, action: "release", reason: body.reason, bypassed },
+        admin_action: { level, action: "release", reason: body.reason, skipped_gates: skippedGates },
         attempts_abandoned: attemptsAbandoned,
         ...(contract ? { contract_id: contract.id } : {}),
         seq,
@@ -1222,39 +1222,39 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
               version = version + 1, updated_at = ?2
         WHERE id = ?3 AND version = ?4 AND status IN ('engaged','running','review')`,
     ).bind(nextRound, now, card.id, card.version);
-    const roundLimitBypassed = nextRound > 5;
-    const bypassed = roundLimitBypassed
+    const roundLimitSkipped = nextRound > 5;
+    const skippedGates = roundLimitSkipped
       ? (["active_work", "round_limit"] as const)
       : (["active_work"] as const);
     const attemptsAbandoned = attempts.results.length;
     const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
       c,
       card,
-      "card.short_circuited",
+      "card.admin_action",
       {
         action: "reset",
         level,
         reason: body.reason,
-        bypassed,
-        short_circuit: { level, action: "reset", reason: body.reason, bypassed },
+        skipped_gates: skippedGates,
+        admin_action: { level, action: "reset", reason: body.reason, skipped_gates: skippedGates },
         from: card.status,
         to: "open",
         round: nextRound,
-        round_limit_bypassed: roundLimitBypassed,
+        round_limit_skipped: roundLimitSkipped,
         attempts_abandoned: attemptsAbandoned,
         evidence_count: Number(evidence?.count ?? 0),
         contract_id: contract?.id ?? null,
       },
       body.message_id,
       [...related, cardWrite],
-      { level, action: "reset", from: card.status, to: "open", round: nextRound, attempts_abandoned: attemptsAbandoned, bypassed },
+      { level, action: "reset", from: card.status, to: "open", round: nextRound, attempts_abandoned: attemptsAbandoned, skipped_gates: skippedGates },
     );
     return c.json(
       {
         card: updated ?? card,
         level,
         action: "reset",
-        short_circuit: { level, action: "reset", reason: body.reason, bypassed },
+        admin_action: { level, action: "reset", reason: body.reason, skipped_gates: skippedGates },
         round: nextRound,
         attempts_abandoned: attemptsAbandoned,
         ...(contract ? { contract_id: contract.id } : {}),
@@ -1279,7 +1279,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     .bind(card.id)
     .first<ContractRow>();
   const conflict = contract ? verifierConflict(contract, user.id) : null;
-  const bypassed = verifyBypasses({ verdict: body.verdict, evidenceCount, verifierConflict: conflict });
+  const skippedGates = collectSkippedGates({ verdict: body.verdict, evidenceCount, verifierConflict: conflict });
   const outcome = body.verdict === "pass" ? "done" : "rejected";
   assertTransition("verdict", "review", outcome);
 
@@ -1291,7 +1291,7 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     self_reported: true,
     verified_by: user.id,
     verified_at: now,
-    short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+    admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
   });
 
   const related = contract
@@ -1314,13 +1314,13 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
   const { seq, eventId, eventPending, card: updated, receipt } = await appendCardEvent(
     c,
     card,
-    "card.short_circuited",
+    "card.admin_action",
     {
       action: "verify",
       level,
       reason: body.reason,
-      bypassed,
-      short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+      skipped_gates: skippedGates,
+      admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
       from: "review",
       to: "closed",
       outcome,
@@ -1334,14 +1334,14 @@ cardRoutes.post("/cards/:cid/short-circuit", requireUser, async (c) => {
     },
     body.message_id,
     [...related, cardWrite],
-    { level, action: "verify", verdict: body.verdict, outcome, evidence_count: evidenceCount, bypassed },
+    { level, action: "verify", verdict: body.verdict, outcome, evidence_count: evidenceCount, skipped_gates: skippedGates },
   );
   return c.json(
     {
       card: updated ?? card,
       level,
       action: "verify",
-      short_circuit: { level, action: "verify", reason: body.reason, bypassed },
+      admin_action: { level, action: "verify", reason: body.reason, skipped_gates: skippedGates },
       verdict: body.verdict,
       outcome,
       evidence_count: evidenceCount,

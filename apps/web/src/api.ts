@@ -298,7 +298,7 @@ export const api = {
     );
   },
 
-  shortCircuitCard(
+  adminActionCard(
     cardId: string,
     input:
       | {
@@ -326,11 +326,11 @@ export const api = {
       card: Card;
       level: "project_owner" | "project_admin" | "instance_admin";
       action: "engage" | "verify" | "cancel" | "release" | "reset";
-      short_circuit: {
+      admin_action: {
         level: "project_owner" | "project_admin" | "instance_admin";
         action: "engage" | "verify" | "cancel" | "release" | "reset";
         reason: string;
-        bypassed: string[];
+        skipped_gates: string[];
       };
       session_id?: string;
       proposal_id?: string;
@@ -344,7 +344,7 @@ export const api = {
     } & WriteReceipt
   > {
     return request(
-      `/cards/${encodeURIComponent(cardId)}/short-circuit`,
+      `/cards/${encodeURIComponent(cardId)}/admin-action`,
       { method: "POST", body: JSON.stringify(input) },
     );
   },
