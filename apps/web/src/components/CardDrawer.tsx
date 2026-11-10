@@ -337,8 +337,9 @@ export function CardDrawer({
     }) => {
       const reason = adminActionReason.trim();
       if (reason.length < 8) throw new Error(t("adminAction.needReason"));
+      if (!card) throw new Error(t("adminAction.needReason"));
       if (input.action === "engage") {
-        return api.adminActionCard(cardId, {
+        return api.adminActionCard(cardId, card.version, {
           action: "engage",
           message_id: crypto.randomUUID(),
           reason,
@@ -346,7 +347,7 @@ export function CardDrawer({
         });
       }
       if (input.action === "verify") {
-        return api.adminActionCard(cardId, {
+        return api.adminActionCard(cardId, card.version, {
           action: "verify",
           message_id: crypto.randomUUID(),
           reason,
@@ -356,7 +357,7 @@ export function CardDrawer({
             : undefined,
         });
       }
-      return api.adminActionCard(cardId, {
+      return api.adminActionCard(cardId, card.version, {
         action: input.action,
         message_id: crypto.randomUUID(),
         reason,

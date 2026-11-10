@@ -910,18 +910,31 @@ cardRoutes.post("/cards/:cid/admin-action", requireUser, async (c) => {
     if (duplicate) return c.json(duplicate, duplicate.event_pending ? 202 : 200);
   }
 
+  // A stale admin page must not act on work it has not seen: require the
+  // caller's expected card version and reject a mismatch, like every other
+  // card write (AGENTS.md: writing a card requires If-Match). Dedupe stays
+  // first so a replay of an accepted command returns the original receipt.
+  const expectedVersion = parseIfMatch(c);
+  if (card.version !== expectedVersion) versionConflict(expectedVersion, card.version);
+
   assertAdminActionState(body.action, card);
 
   const now = nowIso();
 
   if (body.action === "engage") {
-    const target = body.assignee_agent_id ?? card.assignee_agent_id;
-    if (!target) {
+    // An explicit assignee is a public scoped ref (<project_id>:<local_slug>);
+    // the card's own assignee_agent_id is an internal ag_* id (D1 FK). The two
+    // namespaces are distinct: resolve the former, look up the latter directly.
+    let resolved: string | null = null;
+    if (body.assignee_agent_id) {
+      resolved = await resolveProjectAgentReference(c.env.DB, card.project_id, body.assignee_agent_id);
+      if (!resolved) {
+        throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
+      }
+    } else if (card.assignee_agent_id) {
+      resolved = card.assignee_agent_id;
+    } else {
       throw new HttpError(400, "ASSIGNEE_REQUIRED", "engage requires an assignee agent");
-    }
-    const resolved = await resolveProjectAgentReference(c.env.DB, card.project_id, target);
-    if (!resolved) {
-      throw new HttpError(400, "ASSIGNEE_NOT_ACTIVE", "assignee is not an active member of this project");
     }
     if (card.created_by_type === "agent" && card.created_by_id === resolved) {
       throw new HttpError(409, "SELF_ASSIGNMENT", "cannot directly engage the card creator");
