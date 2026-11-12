@@ -337,7 +337,7 @@ export function CardDrawer({
     }) => {
       const reason = adminActionReason.trim();
       if (reason.length < 8) throw new Error(t("adminAction.needReason"));
-      if (!card) throw new Error(t("adminAction.needReason"));
+      if (!card) throw new Error(t("adminAction.needCard"));
       if (input.action === "engage") {
         return api.adminActionCard(cardId, card.version, {
           action: "engage",

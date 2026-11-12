@@ -349,6 +349,7 @@ export const en = {
   "adminAction.levelProject": "Project-level",
   "adminAction.levelInstance": "Instance-level",
   "adminAction.needReason": "Enter a reason of at least 8 characters.",
+  "adminAction.needCard": "The card has not finished loading; try again in a moment.",
   "adminAction.noAgents": "No active Agent in this project.",
   "adminAction.skipsEvidence": "This pass skips the evidence gate and records that in the event.",
   "adminAction.success": "Admin action recorded.",

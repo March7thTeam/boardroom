@@ -350,6 +350,7 @@ export const zh: Record<keyof typeof en, string> = {
   "adminAction.levelProject": "项目级",
   "adminAction.levelInstance": "实例级",
   "adminAction.needReason": "请填写至少 8 个字符的理由。",
+  "adminAction.needCard": "卡片尚未加载完成，请稍后重试。",
   "adminAction.noAgents": "本项目没有 active Agent。",
   "adminAction.skipsEvidence": "此次通过会跳过证据门槛，并在事件中记录。",
   "adminAction.success": "管理员操作已记录。",
