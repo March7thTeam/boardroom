@@ -66,8 +66,11 @@ contracts:            proposer_agent_id = 目标 Agent, acceptor_user_id = 管�
 ```http
 POST /api/v1/cards/:cid/admin-action
 Content-Type: application/json
+If-Match: <card.version>
 Cookie: <session>
 ```
+
+必须带 `If-Match: <卡片当前 version>`，与其他卡片写路径一致：缺失返回 `428 PRECONDITION_REQUIRED`，过期返回 `409 VERSION_CONFLICT`（`details` 带 `expected_version` / `actual_version`），管理员页面不得对没看过的版本动手。`message_id` 幂等查重仍在校验之前，已接受命令的重放返回原回执，不会撞 428/409。
 
 请求体：
 
@@ -115,6 +118,8 @@ Cookie: <session>
 | HTTP | code | 场景 |
 |---|---|---|
 | 403 | `ADMIN_PRIVILEGED_FORBIDDEN` | 非项目 owner/admin、非实例 admin |
+| 428 | `PRECONDITION_REQUIRED` | 缺少 `If-Match` |
+| 409 | `VERSION_CONFLICT` | `If-Match` 与卡片当前 version 不符（`details.expected_version` / `actual_version`） |
 | 409 | `CARD_PAUSED` | 除 `cancel` 外，卡片已暂停 |
 | 409 | `ADMIN_ACTION_STATE` | 状态不满足该 action（`details.from` / `details.allowed`） |
 | 409 | `NEGOTIATION_OPEN` | `engage` 时当前轮次已有 open session；应先走正常 `commit` |

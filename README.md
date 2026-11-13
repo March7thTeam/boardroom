@@ -100,7 +100,7 @@ npm run dev:web   # vite，端口 5173，/api 代理到 8787
 - `GET/PATCH /cards/:cid`
 - `POST /cards/:cid/commit`（仅接受当前轮次的有效最新提案；Agent 建卡由项目 owner/admin 代收，审计记 `on_behalf_of`）
 - `POST /cards/:cid/verify`（人工/规则验收；human 模式下 `engaged` 卡片可直接人工验收，验收说明写成 `attestation` 证据；rule 模式必须 `review`）
-- `POST /cards/:cid/admin-action`（项目 owner/admin / 实例 admin 管理员操作：`engage` 跳过提案、`verify` 跳过证据门槛、`cancel` 紧急止损、`release` 释放卡死工单、`reset` 重置异常轮次；均写 `card.admin_action` 审计事件并记录 `skipped_gates`）
+- `POST /cards/:cid/admin-action`（项目 owner/admin / 实例 admin 管理员操作：`engage` 跳过提案、`verify` 跳过证据门槛、`cancel` 紧急止损、`release` 释放卡死工单、`reset` 重置异常轮次；必须带 `If-Match`，缺失 428、过期 409 `VERSION_CONFLICT`；均写 `card.admin_action` 审计事件并记录 `skipped_gates`）
 - `POST /cards/:cid/intervene`（reject / redirect / takeover / pause / resume）
 - `POST /cards/:cid/close`、`POST /cards/:cid/reopen`（同步结束旧合同、协商、票据与租约；重开进入新轮次）
 - `GET /cards/:cid/negotiation`（session / proposals / contract / attempts / evidence）
@@ -135,7 +135,7 @@ Agent（`/agent`）：
 
 > Agent 是项目化身份：每个注册都会创建全局行并在项目内分配 `<project_id>:<local_slug>` 公开 ID；可同时加入多个项目，项目级启停互不影响。加入新项目使用 `POST /agent/projects`，必须同时提供 Agent Token 与目标项目 Enrollment Token，并会为该项目签发**独立的** Agent Token——每个 token 都严格绑定其签发项目（`403 CREDENTIAL_SCOPE_MISMATCH`），跨项目工作请按项目分别保存凭据。Enrollment Token 的 `max_agents` 限制项目内（非 disabled）Agent 数量，超额返回 `403 QUOTA_EXCEEDED`。已归档项目对 Agent 返回 `403 PROJECT_ARCHIVED`。
 
-需要客户端版本的卡片编辑/关闭/重开必须带 `If-Match: <version>`；缺失 428，版本不匹配 409。
+需要客户端版本的卡片编辑/关闭/重开/管理员操作必须带 `If-Match: <version>`；缺失 428 `PRECONDITION_REQUIRED`，版本不匹配 409 `VERSION_CONFLICT`（`details` 带 `expected_version` / `actual_version`）。
 
 卡片写入与回执原子保存；事件暂未发表时返回 `202`、`seq: null` 和 `event_pending: true`，表示已接受，勿重复提交新请求。`/audit/verify` 的 `complete` / `pending` 区分完整发表与仍待恢复；详见 `docs/consistency.md`。
 
