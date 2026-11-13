@@ -136,11 +136,14 @@ async function fixture() {
     body: unknown = {},
     email = OWNER_EMAIL,
     method = "POST",
+    ifMatch?: number,
   ): Promise<{ status: number; body: ApiBody }> {
+    const headers: Record<string, string> = { "Content-Type": "application/json", "X-Dev-Email": email };
+    if (ifMatch !== undefined) headers["If-Match"] = String(ifMatch);
     const response = await app.fetch(
       new Request(`http://local${path}`, {
         method,
-        headers: { "Content-Type": "application/json", "X-Dev-Email": email },
+        headers,
         body: method === "GET" ? undefined : JSON.stringify(body),
       }),
       env,
@@ -166,6 +169,25 @@ async function fixture() {
       { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
     );
     return { status: response.status, body: (await response.json()) as ApiBody };
+  }
+
+  /**
+   * Admin-action call with the card's CURRENT version as If-Match, mirroring
+   * what the drawer does after refreshing. Optionally pin a stale version to
+   * exercise the precondition path.
+   */
+  async function adminCall(
+    path: string,
+    body: unknown,
+    email: string = OWNER_EMAIL,
+    staleVersion?: number,
+  ): Promise<{ status: number; body: ApiBody }> {
+    const cardId = path.split("/")[4] ?? "";
+    const row = cardId
+      ? await db.prepare("SELECT version FROM cards WHERE id = ?1").bind(cardId).first<{ version: number }>()
+      : null;
+    const version = staleVersion ?? row?.version ?? 1;
+    return human(path, body, email, "POST", version);
   }
 
   let cardSeq = 0;
@@ -277,6 +299,8 @@ async function fixture() {
   return {
     db,
     call: human,
+    adminCall,
+    human,
     agentCall,
     createCard,
     insertCard,
@@ -292,7 +316,7 @@ describe("admin action", () => {
     const f = await fixture();
     const cid = await f.createCard();
 
-    const response = await f.call(`/api/v1/cards/${cid}/admin-action`, {
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
       action: "engage",
       reason: "no online peer to propose",
       assignee_agent_id: BOT,
@@ -341,8 +365,7 @@ describe("admin action", () => {
   it("denies a plain project member", async () => {
     const f = await fixture();
     const cid = await f.createCard();
-    const response = await f.call(
-      `/api/v1/cards/${cid}/admin-action`,
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "member should not pass", assignee_agent_id: BOT },
       MEMBER_EMAIL,
     );
@@ -353,8 +376,7 @@ describe("admin action", () => {
   it("lets a project admin act without being an instance admin", async () => {
     const f = await fixture();
     const cid = await f.createCard();
-    const response = await f.call(
-      `/api/v1/cards/${cid}/admin-action`,
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "project admin governance", assignee_agent_id: BOT },
       PROJECT_ADMIN_EMAIL,
     );
@@ -414,8 +436,7 @@ describe("admin action", () => {
   it("lets an instance admin act on a project without membership", async () => {
     const f = await fixture();
     const cid = await f.createCard();
-    const response = await f.call(
-      `/api/v1/cards/${cid}/admin-action`,
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`,
       { action: "engage", reason: "instance-wide governance", assignee_agent_id: BOT },
       ADMIN_EMAIL,
     );
@@ -428,7 +449,7 @@ describe("admin action", () => {
     const f = await fixture();
     const cid = await f.createCard();
     f.seedSession(cid, "open");
-    const response = await f.call(`/api/v1/cards/${cid}/admin-action`, {
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
       action: "engage",
       reason: "should use normal commit",
       assignee_agent_id: BOT,
@@ -446,7 +467,7 @@ describe("admin action", () => {
       createdById: BOT_AGENT_ID,
       requesterAgentId: BOT_AGENT_ID,
     });
-    const response = await f.call("/api/v1/cards/c_agent_owned/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_agent_owned/admin-action", {
       action: "engage",
       reason: "self assignment must be blocked",
       assignee_agent_id: BOT,
@@ -458,7 +479,7 @@ describe("admin action", () => {
   it("closes a review card with zero evidence and records the skipped gate", async () => {
     const f = await fixture();
     const contractId = f.seedReviewCard({ id: "c_no_evidence", proposerAgentId: BOT_AGENT_ID });
-    const response = await f.call("/api/v1/cards/c_no_evidence/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_no_evidence/admin-action", {
       action: "verify",
       reason: "CI green but artifacts were omitted",
       verdict: "pass",
@@ -491,7 +512,7 @@ describe("admin action", () => {
       proposerUserId: OWNER,
       evidence: true,
     });
-    const response = await f.call("/api/v1/cards/c_conflict/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_conflict/admin-action", {
       action: "verify",
       reason: "owner is the only available verifier",
       verdict: "pass",
@@ -512,7 +533,7 @@ describe("admin action", () => {
       proposerAgentId: BOT_AGENT_ID,
       evidence: true,
     });
-    const response = await f.call("/api/v1/cards/c_reject/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_reject/admin-action", {
       action: "verify",
       reason: "evidence does not match the delivered scope",
       verdict: "reject",
@@ -527,7 +548,7 @@ describe("admin action", () => {
   it("rejects a paused card and the wrong state", async () => {
     const f = await fixture();
     f.insertCard({ id: "c_paused", status: "open", pausedAt: "2026-01-01T00:00:00.000Z" });
-    const paused = await f.call("/api/v1/cards/c_paused/admin-action", {
+    const paused = await f.adminCall("/api/v1/cards/c_paused/admin-action", {
       action: "engage",
       reason: "paused cards stay paused",
       assignee_agent_id: BOT,
@@ -536,7 +557,7 @@ describe("admin action", () => {
     expect(paused.body.error?.code).toBe("CARD_PAUSED");
 
     const cid = await f.createCard();
-    const wrongState = await f.call(`/api/v1/cards/${cid}/admin-action`, {
+    const wrongState = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
       action: "verify",
       reason: "open card cannot be verified",
       verdict: "pass",
@@ -554,9 +575,9 @@ describe("admin action", () => {
       reason: "idempotent governance action",
       assignee_agent_id: BOT,
     };
-    const first = await f.call(`/api/v1/cards/${cid}/admin-action`, body);
+    const first = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, body);
     expect(first.status, JSON.stringify(first.body)).toBe(201);
-    const second = await f.call(`/api/v1/cards/${cid}/admin-action`, body);
+    const second = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, body);
     expect(second.status).toBe(200);
     expect(second.body.duplicate).toBe(true);
     const contracts = f.db.sqlite.prepare("SELECT COUNT(*) AS count FROM contracts WHERE card_id = ?").get(cid) as { count: number };
@@ -578,7 +599,7 @@ describe("admin action", () => {
     });
     f.seedAttempt("c_cancel", contractId, "running");
 
-    const response = await f.call("/api/v1/cards/c_cancel/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_cancel/admin-action", {
       action: "cancel",
       reason: "abusive card; emergency stop",
     });
@@ -631,7 +652,7 @@ describe("admin action", () => {
     });
     f.seedAttempt("c_release", contractId, "issued");
 
-    const response = await f.call("/api/v1/cards/c_release/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_release/admin-action", {
       action: "release",
       reason: "execution ticket is stuck; return to engaged",
     });
@@ -662,7 +683,7 @@ describe("admin action", () => {
       evidence: true,
     });
 
-    const response = await f.call("/api/v1/cards/c_reset/admin-action", {
+    const response = await f.adminCall("/api/v1/cards/c_reset/admin-action", {
       action: "reset",
       reason: "platform bug left the card in review",
     });
@@ -696,26 +717,180 @@ describe("admin action", () => {
     const f = await fixture();
     const cid = await f.createCard();
 
-    const release = await f.call(`/api/v1/cards/${cid}/admin-action`, {
+    const release = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
       action: "release",
       reason: "open cards have no ticket to release",
     });
     expect(release.status).toBe(409);
     expect(release.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
-    const reset = await f.call(`/api/v1/cards/${cid}/admin-action`, {
+    const reset = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
       action: "reset",
       reason: "open cards are already open",
     });
     expect(reset.status).toBe(409);
     expect(reset.body.error?.code).toBe("ADMIN_ACTION_STATE");
 
-    const memberCancel = await f.call(
-      `/api/v1/cards/${cid}/admin-action`,
+    const memberCancel = await f.adminCall(`/api/v1/cards/${cid}/admin-action`,
       { action: "cancel", reason: "member cannot stop the card" },
       MEMBER_EMAIL,
     );
     expect(memberCancel.status).toBe(403);
     expect(memberCancel.body.error?.code).toBe("ADMIN_PRIVILEGED_FORBIDDEN");
+  });
+
+  it("requires If-Match and rejects a stale version (P2-A)", async () => {
+    const f = await fixture();
+    const cid = await f.createCard();
+
+    // no If-Match at all -> 428, like every other card write
+    const bare = await f.human(`/api/v1/cards/${cid}/admin-action`, {
+      action: "cancel", reason: "no header at all",
+    });
+    expect(bare.status).toBe(428);
+    expect(bare.body.error?.code).toBe("PRECONDITION_REQUIRED");
+
+    // build round-2 work: engage -> reset -> engage again
+    let r = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "no online peer to propose", assignee_agent_id: BOT,
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    r = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "reset", reason: "platform bug needs a new round",
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    r = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "re-engage after bug recovery", assignee_agent_id: BOT,
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const contracts = f.db.sqlite
+      .prepare("SELECT id FROM contracts WHERE card_id = ? ORDER BY created_at")
+      .all(cid) as Array<{ id: string }>;
+    expect(contracts.length).toBe(2);
+
+    // a stale page holding version 1 must NOT cancel the round-2 work anymore
+    const stale = await f.adminCall(
+      `/api/v1/cards/${cid}/admin-action`,
+      { action: "cancel", reason: "stale page emergency stop" },
+      OWNER_EMAIL,
+      1,
+    );
+    expect(stale.status).toBe(409);
+    expect(stale.body.error?.code).toBe("VERSION_CONFLICT");
+
+    const card = f.db.sqlite
+      .prepare("SELECT status, outcome, round FROM cards WHERE id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(card).toMatchObject({ status: "engaged", outcome: null, round: 2 });
+    const c2 = f.db.sqlite
+      .prepare("SELECT state FROM contracts WHERE id = ?")
+      .get(contracts[1].id) as Record<string, unknown>;
+    expect(c2.state).toBe("active");
+
+    // and the fresh version still works
+    const fresh = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "cancel", reason: "legit emergency stop now",
+    });
+    expect(fresh.status).toBe(200);
+  });
+
+  it("engages with the card's existing internal assignee when the field is omitted (P2-B)", async () => {
+    const f = await fixture();
+    const cid = "c_fallback";
+    f.insertCard({ id: cid, status: "open", assigneeAgentId: BOT_AGENT_ID });
+
+    // previously: 400 ASSIGNEE_NOT_ACTIVE (internal ag_* id fed to the scoped-ref resolver)
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "fallback assignee must work",
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(response.body.card?.status).toBe("engaged");
+    expect(response.body.card?.assignee_agent_id).toBe(BOT_AGENT_ID);
+    const contract = f.db.sqlite
+      .prepare("SELECT proposer_agent_id, state FROM contracts WHERE card_id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(contract).toMatchObject({ proposer_agent_id: BOT_AGENT_ID, state: "active" });
+  });
+
+  it("resets a round-5 card into round 6 instead of 500 (P2-C)", async () => {
+    const f = await fixture();
+    const cid = "c_round6";
+    f.insertCard({ id: cid, status: "running", round: 5 });
+
+    // previously: 500 CHECK constraint failed: round BETWEEN 1 AND 5
+    const response = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "reset", reason: "governance reset past the round ceiling",
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body.round).toBe(6);
+    expect(response.body.admin_action?.skipped_gates).toEqual(["active_work", "round_limit"]);
+
+    const card = f.db.sqlite
+      .prepare("SELECT status, round FROM cards WHERE id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(card).toMatchObject({ status: "open", round: 6 });
+
+    // governance can keep pushing the round forward, and re-engaging in round 6 works
+    const again = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "engage again in round six", assignee_agent_id: BOT,
+    });
+    expect(again.status, JSON.stringify(again.body)).toBe(201);
+    const session = f.db.sqlite
+      .prepare("SELECT round, state FROM negotiation_sessions WHERE card_id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(session).toMatchObject({ round: 6, state: "committed" });
+
+    // normal negotiation still enforces the 5-round cap at the route layer:
+    // reopen of a closed card at round 6 is refused (state/permission guards),
+    // and a fresh round-6 reopen by the creator is capped at ROUND_LIMIT — never a 500.
+    const closed = f.db.sqlite
+      .prepare("SELECT status FROM cards WHERE id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(closed.status).not.toBe("closed"); // card is engaged; reopen guard fires first
+    expect(Number((f.db.sqlite.prepare("SELECT round FROM cards WHERE id = ?").get(cid) as Record<string, unknown>).round)).toBe(6);
+  });
+
+  it("keeps round 6 closed to normal negotiation so a member cannot preempt engage", async () => {
+    const f = await fixture();
+    const cid = "c_round6_gate";
+    f.insertCard({ id: cid, status: "running", round: 5 });
+
+    const reset = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "reset", reason: "governance reset past the round ceiling",
+    });
+    expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+
+    // A plain project Agent must not be able to open a round-6 session. Doing so
+    // made privileged `engage` answer 409 NEGOTIATION_OPEN, letting a lower-privileged
+    // member starve the governance recovery that `reset` exists to provide.
+    const proposal = await f.agentCall(`/agent/cards/${cid}/negotiate`, {
+      card_id: cid,
+      type: "proposal",
+      message_id: "m_round6_preempt",
+      terms: { scope: "preempt governance recovery" },
+    });
+    expect(proposal.status, JSON.stringify(proposal.body)).toBe(409);
+    expect(proposal.body.error?.code).toBe("ROUND_LIMIT");
+    const sessions = f.db.sqlite
+      .prepare("SELECT count(*) AS c FROM negotiation_sessions WHERE card_id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(sessions).toMatchObject({ c: 0 });
+
+    // Inquiries stay allowed: they are messages, not sessions, and cannot block engage.
+    const inquiry = await f.agentCall(`/agent/cards/${cid}/negotiate`, {
+      card_id: cid,
+      type: "inquiry",
+      message_id: "m_round6_inquiry",
+      need: { question: "what is left to do?" },
+    });
+    expect(inquiry.status, JSON.stringify(inquiry.body)).toBe(201);
+
+    // The governance path itself is unaffected: engage still mints its synthetic
+    // round-6 session because it does not go through the normal negotiation route.
+    const engaged = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "engage must survive a blocked proposal", assignee_agent_id: BOT,
+    });
+    expect(engaged.status, JSON.stringify(engaged.body)).toBe(201);
+    expect(engaged.body.card?.status).toBe("engaged");
   });
 });

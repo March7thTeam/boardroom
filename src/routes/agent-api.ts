@@ -58,6 +58,12 @@ import type {
 
 export const agentApiRoutes = new Hono<AppEnv>();
 
+/**
+ * 普通协商的轮次上限（与 cards.ts 的 ROUND_LIMIT 判定一致）。治理 `reset` 可以把
+ * 卡片推到 6+ 轮，那时正常协商通道必须关闭，只剩管理员 `engage` 能推进。
+ */
+const NORMAL_ROUND_LIMIT = 5;
+
 const registerSchema = z.object({
   id: z
     .string()
@@ -382,6 +388,16 @@ agentApiRoutes.post("/cards/:cid/negotiate", requireAgent, async (c) => {
   }
   if (card.status !== "open") {
     throw new HttpError(409, "CARD_NOT_OPEN", "negotiation is only allowed while the card is open");
+  }
+  // 治理 `reset` 会把轮次推到 6+，此时必须关掉正常协商：普通 Agent 一旦开出
+  // round 6 的 session，特权 `engage` 就会撞 NEGOTIATION_OPEN，低权限成员反而
+  // 锁死了 reset 本要提供的治理兜底。`inquiry` 只是留言、不建 session，不拦；
+  // 治理侧的合成 session 由 cards.ts 的 admin-action 自己建，不走这里。
+  if (card.round > NORMAL_ROUND_LIMIT && body.type !== "inquiry") {
+    throw new HttpError(409, "ROUND_LIMIT", "card has reached the maximum number of rounds", {
+      round: card.round,
+      normal_limit: NORMAL_ROUND_LIMIT,
+    });
   }
 
   const now = nowIso();

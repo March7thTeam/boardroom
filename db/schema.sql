@@ -210,7 +210,8 @@ CREATE TABLE cards (
                        CHECK (status IN ('open','engaged','running','review','closed')),
   outcome            TEXT CHECK (outcome IN ('done','rejected','cancelled','expired')),
   version            INTEGER NOT NULL DEFAULT 1,
-  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 5),
+  -- 普通协商的 5 轮上限由路由层强制（ROUND_LIMIT）；治理 reset 可开 round 6+，DB 上限放宽到 100
+  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 100),
   priority           INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 100),
   requester_agent_id TEXT REFERENCES agents(id),
   assignee_agent_id  TEXT REFERENCES agents(id),
@@ -271,7 +272,7 @@ CREATE TABLE negotiation_sessions (
   initiator_agent_id TEXT REFERENCES agents(id),
   initiator_user_id  TEXT REFERENCES users(id),
   responder_agent_id TEXT NOT NULL REFERENCES agents(id),
-  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 5),
+  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 100),
   state              TEXT NOT NULL DEFAULT 'open'
                        CHECK (state IN ('open','committed','failed','cancelled','expired')),
   created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

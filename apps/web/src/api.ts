@@ -300,6 +300,7 @@ export const api = {
 
   adminActionCard(
     cardId: string,
+    version: number,
     input:
       | {
           action: "engage";
@@ -345,7 +346,7 @@ export const api = {
   > {
     return request(
       `/cards/${encodeURIComponent(cardId)}/admin-action`,
-      { method: "POST", body: JSON.stringify(input) },
+      { method: "POST", ifMatch: String(version), body: JSON.stringify(input) },
     );
   },
 
