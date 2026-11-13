@@ -117,7 +117,7 @@ Agent（`/agent`）：
 - `GET /cards?status=&since=&project_id=&order=updated&cursor=&limit=`（稳定增量分页；每个凭据只能返回自己绑定的项目，显式 `project_id` 指向其他项目时返回 `403 CREDENTIAL_SCOPE_MISMATCH`；响应含 `next_cursor`）
 - `POST /cards?project_id=`（创建 Agent 自己的卡片；多项目必须传 `project_id`）
 - `GET /cards/:cid/negotiation`（读取 session / proposals / 最新提案 / contract；仅协商参与 Agent 可见）
-- `POST /cards/:cid/negotiate`（inquiry / proposal / counter / commit）
+- `POST /cards/:cid/negotiate`（inquiry / proposal / counter / commit；`round > 5` 后正常协商关闭，proposal/counter/commit 返回 `409 ROUND_LIMIT`，只能由管理员 `engage` 推进）
 - `POST /cards/:cid/tickets`（领取执行票据）
 - `POST /cards/:cid/runs`（校验指定 GitHub Actions attempt；必须声明至少一条 artifact；空证据返回 `422 EVIDENCE_REQUIRED`，重复哈希的大小冲突返回 `422 INVALID_ARGUMENT`；回传期间卡片变更时拒绝旧结果）
 - `POST/DELETE /cards/:cid/lease`（取/续/释放执行租约）

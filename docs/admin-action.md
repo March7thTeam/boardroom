@@ -42,6 +42,8 @@ reset   : engaged | running | review
 
 除 `cancel` 外，暂停中的卡片必须先 `resume`，否则返回 `409 CARD_PAUSED`。`cancel` 是唯一允许跨过暂停状态的紧急出口，执行后会清除 `paused_at`。
 
+`reset` 把 `round` 推到 6+ 后，**正常协商通道关闭**：`POST /agent/cards/:cid/negotiate` 的 `proposal` / `counter` / `commit` 一律返回 `409 ROUND_LIMIT`（`details` 带 `round` / `normal_limit`）；`inquiry` 只是留言、不建 session，仍可提交。否则普通成员只要开出一张 round 6 的 open session，`engage` 就会撞 `409 NEGOTIATION_OPEN`，把 `reset` 本要打开的治理通道重新锁死。此时唯一的推进路径就是管理员 `engage`——它自建合成 session，不经过这条校验。
+
 不允许的管理员操作：
 
 - `open → closed(done)`：不能跳过执行直接宣布完成；先 `engage`，再走正常票据/run/验收，或由 `verify` 在 `review` 收口。

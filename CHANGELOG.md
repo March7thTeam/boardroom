@@ -12,7 +12,7 @@
 - 新增项目级管理员角色 `project_members.role = 'admin'`：owner 可在「项目参与者」面板通过「修改权限」下拉授予/撤销；项目管理员可使用管理员操作，但不能管理成员或转让所有权。项目角色现为 `owner` / `admin` / `member`，新增迁移 `0002_project_admin_role.sql`。
 - 修复 human 模式无执行目标时无法验收的问题：`POST /api/v1/cards/:cid/verify` 现在允许 `engaged` 卡片直接 `pass`/`reject`，必须带 ≥8 字符验收说明；服务端写入 `kind='attestation'` 证据并把合同置为 `fulfilled`/`breached`，事件记录 `from='engaged'`、`human_attested=true`。rule 模式仍只接受 `review`。
 - **行为变更**：`admin-action` 现在必须带 `If-Match`（缺失 428 `PRECONDITION_REQUIRED`，过期 409 `VERSION_CONFLICT`），与其他卡片写路径一致；`message_id` 幂等查重仍在版本校验之前，已接受命令的重放返回原回执。前端 `adminActionCard` 改为传卡片当前 `version`。
-- 新增迁移 `0003_round_ceiling_for_governance_reset.sql`：把 `cards.round` / `negotiation_sessions.round` 的 DB CHECK 上限从 5 放宽到 100，使 `reset` 的治理兜底（`round_limit_skipped: true` 后仍可 `engage` 推进）不再撞 `CHECK constraint failed`。普通协商的 5 轮上限不变，仍由路由层强制（409 `ROUND_LIMIT`）。
+- 新增迁移 `0003_round_ceiling_for_governance_reset.sql`：把 `cards.round` / `negotiation_sessions.round` 的 DB CHECK 上限从 5 放宽到 100，使 `reset` 的治理兜底（`round_limit_skipped: true` 后仍可 `engage` 推进）不再撞 `CHECK constraint failed`。普通协商的 5 轮上限不变，仍由路由层强制（409 `ROUND_LIMIT`）：`round > 5` 后 Agent 侧的 `proposal` / `counter` / `commit` 直接拒绝（`inquiry` 除外），避免普通成员开出 round 6 的 open session 让 `engage` 撞 `NEGOTIATION_OPEN`，把治理兜底反向锁死。
 - 版本号升级为 `0.2.0`（beta）。
 
 ## 0.1.0（beta）

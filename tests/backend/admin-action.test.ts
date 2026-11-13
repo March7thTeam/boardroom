@@ -849,4 +849,48 @@ describe("admin action", () => {
     expect(closed.status).not.toBe("closed"); // card is engaged; reopen guard fires first
     expect(Number((f.db.sqlite.prepare("SELECT round FROM cards WHERE id = ?").get(cid) as Record<string, unknown>).round)).toBe(6);
   });
+
+  it("keeps round 6 closed to normal negotiation so a member cannot preempt engage", async () => {
+    const f = await fixture();
+    const cid = "c_round6_gate";
+    f.insertCard({ id: cid, status: "running", round: 5 });
+
+    const reset = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "reset", reason: "governance reset past the round ceiling",
+    });
+    expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+
+    // A plain project Agent must not be able to open a round-6 session. Doing so
+    // made privileged `engage` answer 409 NEGOTIATION_OPEN, letting a lower-privileged
+    // member starve the governance recovery that `reset` exists to provide.
+    const proposal = await f.agentCall(`/agent/cards/${cid}/negotiate`, {
+      card_id: cid,
+      type: "proposal",
+      message_id: "m_round6_preempt",
+      terms: { scope: "preempt governance recovery" },
+    });
+    expect(proposal.status, JSON.stringify(proposal.body)).toBe(409);
+    expect(proposal.body.error?.code).toBe("ROUND_LIMIT");
+    const sessions = f.db.sqlite
+      .prepare("SELECT count(*) AS c FROM negotiation_sessions WHERE card_id = ?")
+      .get(cid) as Record<string, unknown>;
+    expect(sessions).toMatchObject({ c: 0 });
+
+    // Inquiries stay allowed: they are messages, not sessions, and cannot block engage.
+    const inquiry = await f.agentCall(`/agent/cards/${cid}/negotiate`, {
+      card_id: cid,
+      type: "inquiry",
+      message_id: "m_round6_inquiry",
+      need: { question: "what is left to do?" },
+    });
+    expect(inquiry.status, JSON.stringify(inquiry.body)).toBe(201);
+
+    // The governance path itself is unaffected: engage still mints its synthetic
+    // round-6 session because it does not go through the normal negotiation route.
+    const engaged = await f.adminCall(`/api/v1/cards/${cid}/admin-action`, {
+      action: "engage", reason: "engage must survive a blocked proposal", assignee_agent_id: BOT,
+    });
+    expect(engaged.status, JSON.stringify(engaged.body)).toBe(201);
+    expect(engaged.body.card?.status).toBe("engaged");
+  });
 });
