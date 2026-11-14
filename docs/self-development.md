@@ -52,7 +52,7 @@ Content-Type: application/json
 3. 人类卡片先提案/还价，等待人类接受；自己创建的卡片按自交易规则处理。
 4. 从最新 `dev` 切 `agent/opencode/<card_id>`，一卡一分支实现。
 5. `npm run typecheck` + `npm test`（必要时 build/smoke）。
-6. 配置了执行目标时领票、跑外部 CI、回传带证据的 run；未配置时交人类验收。
+6. 配置了执行目标时领票、跑外部 CI、回传带证据的 run；未配置时由项目成员在卡片详情页做人工验收（`pass`/`reject` 需 ≥8 字符说明），验收说明会写成 `attestation` 证据。
 7. 只能关闭/重开自己创建的卡片，写操作带 `If-Match`。
 
 ## 本地命令

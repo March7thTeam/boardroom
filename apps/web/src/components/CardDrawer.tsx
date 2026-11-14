@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, Pencil, RefreshCw, RotateCcw, X } from "lucide-react";
 import { api, ApiError, safeParseCriteriaJson } from "../api";
 import { useI18n } from "../i18n";
-import type { Card, UserProfile } from "../types";
+import type { Card, ProjectRole, UserProfile } from "../types";
 import { OutcomeIcon, StatusIcon } from "./Icons";
 import {
   formatDateTime,
@@ -16,6 +16,8 @@ import {
 type CardDrawerProps = {
   cardId: string;
   projectId: string;
+  projectRole?: ProjectRole;
+  verificationMode?: "human" | "rule";
   fallbackCard?: Card | null;
   agentNameMap: ReadonlyMap<string, string>;
   currentUser: UserProfile;
@@ -35,6 +37,8 @@ function prettyJson(raw: string): string {
 export function CardDrawer({
   cardId,
   projectId,
+  projectRole,
+  verificationMode,
   fallbackCard,
   agentNameMap,
   currentUser,
@@ -76,6 +80,8 @@ export function CardDrawer({
   const [interventionReason, setInterventionReason] = useState("");
   const [redirectPriority, setRedirectPriority] = useState(50);
   const [verdictReason, setVerdictReason] = useState("");
+  const [adminActionReason, setAdminActionReason] = useState("");
+  const [adminActionTarget, setAdminActionTarget] = useState("");
 
   const card = detailQuery.data?.card ?? fallbackCard ?? null;
   const events = useMemo(() => {
@@ -86,6 +92,21 @@ export function CardDrawer({
   const rules = useMemo(
     () => safeParseCriteriaJson(card?.criteria_json ?? null),
     [card?.criteria_json],
+  );
+
+  const canAdminAction =
+    currentUser.role === "admin" ||
+    projectRole === "owner" ||
+    projectRole === "admin";
+  const adminActionReady = adminActionReason.trim().length >= 8;
+  const adminActionAgentsQuery = useQuery({
+    queryKey: ["project-agents", projectId],
+    queryFn: () => api.getProjectAgents(projectId),
+    enabled: canAdminAction && card?.status === "open",
+  });
+  const adminActionAgents = useMemo(
+    () => (adminActionAgentsQuery.data?.agents ?? []).filter((agent) => agent.status === "active"),
+    [adminActionAgentsQuery.data],
   );
 
   const assigneeLabel =
@@ -116,10 +137,12 @@ export function CardDrawer({
 
   const negotiation = negotiationQuery.data;
   const latestProposal = negotiation?.proposals.at(-1) ?? null;
-  // `verify pass` requires at least one evidence row server-side; with no
-  // declared artifact the button can only return 409 EVIDENCE_REQUIRED.
+  // `verify pass` in review requires at least one evidence row server-side.
+  // Human attestation of an engaged contract creates that row itself.
   const evidenceCount = negotiation?.evidence?.length ?? 0;
-  const passBlockedByEvidence = evidenceCount === 0;
+  const humanAttestation = card?.status === "engaged" && verificationMode === "human";
+  const passBlockedByEvidence = card?.status === "review" && evidenceCount === 0;
+  const attestationReady = verdictReason.trim().length >= 8;
   const canAcceptProposal =
     card?.status === "open" &&
     card?.created_by_type === "user" &&
@@ -302,6 +325,50 @@ export function CardDrawer({
     onSuccess: (result) => {
       setInterventionReason("");
       setActionBanner({ type: result.event_pending ? "warning" : "success", message: result.event_pending ? t("common.eventPending") : "人工干预已记录。" });
+      refreshCardAndBoard();
+    },
+    onError: handleWriteError,
+  });
+
+  const adminActionMutation = useMutation({
+    mutationFn: (input: {
+      action: "engage" | "verify" | "cancel" | "release" | "reset";
+      verdict?: "pass" | "reject";
+    }) => {
+      const reason = adminActionReason.trim();
+      if (reason.length < 8) throw new Error(t("adminAction.needReason"));
+      if (!card) throw new Error(t("adminAction.needCard"));
+      if (input.action === "engage") {
+        return api.adminActionCard(cardId, card.version, {
+          action: "engage",
+          message_id: crypto.randomUUID(),
+          reason,
+          ...(adminActionTarget ? { assignee_agent_id: adminActionTarget } : {}),
+        });
+      }
+      if (input.action === "verify") {
+        return api.adminActionCard(cardId, card.version, {
+          action: "verify",
+          message_id: crypto.randomUUID(),
+          reason,
+          verdict: input.verdict ?? "pass",
+          reasons: verdictReason.trim()
+            ? [{ message: verdictReason.trim(), pass: input.verdict === "pass" }]
+            : undefined,
+        });
+      }
+      return api.adminActionCard(cardId, card.version, {
+        action: input.action,
+        message_id: crypto.randomUUID(),
+        reason,
+      });
+    },
+    onSuccess: (result) => {
+      setAdminActionReason("");
+      setActionBanner({
+        type: result.event_pending ? "warning" : "success",
+        message: result.event_pending ? t("common.eventPending") : t("adminAction.success"),
+      });
       refreshCardAndBoard();
     },
     onError: handleWriteError,
@@ -924,32 +991,49 @@ export function CardDrawer({
                       </div>
                     )}
 
-                    {card.status === "review" && (
+                    {(card.status === "review" || humanAttestation) && (
                       <div className="drawer-action-dialog">
-                        <div className="dialog-title">验收</div>
+                        <div className="dialog-title">
+                          {humanAttestation ? t("card.humanAttestTitle") : "验收"}
+                        </div>
+                        {humanAttestation && (
+                          <div className="field-hint">{t("card.humanAttestHint")}</div>
+                        )}
                         <textarea
                           className="textarea"
                           rows={2}
-                          placeholder="验收意见（选填）…"
+                          placeholder={
+                            humanAttestation
+                              ? t("card.humanAttestPlaceholder")
+                              : "验收意见（选填）…"
+                          }
                           value={verdictReason}
                           onChange={(e) => setVerdictReason(e.target.value)}
                         />
+                        {humanAttestation && !attestationReady && (
+                          <div className="field-hint">{t("card.humanAttestRequired")}</div>
+                        )}
                         {passBlockedByEvidence && (
                           <div className="field-hint">{t("card.evidenceRequired")}</div>
                         )}
                         <div className="form-actions">
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-sm"
-                            disabled={verifyMutation.isPending}
-                            onClick={() => verifyMutation.mutate("needs_more")}
-                          >
-                            要求补充
-                          </button>
+                          {!humanAttestation && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={verifyMutation.isPending}
+                              onClick={() => verifyMutation.mutate("needs_more")}
+                            >
+                              要求补充
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn btn-danger btn-sm"
-                            disabled={verifyMutation.isPending}
+                            disabled={
+                              verifyMutation.isPending ||
+                              (humanAttestation && !attestationReady)
+                            }
                             onClick={() => verifyMutation.mutate("reject")}
                           >
                             拒绝
@@ -957,7 +1041,11 @@ export function CardDrawer({
                           <button
                             type="button"
                             className="btn btn-primary btn-sm"
-                            disabled={verifyMutation.isPending || passBlockedByEvidence}
+                            disabled={
+                              verifyMutation.isPending ||
+                              passBlockedByEvidence ||
+                              (humanAttestation && !attestationReady)
+                            }
                             title={passBlockedByEvidence ? t("card.evidenceRequired") : undefined}
                             onClick={() => verifyMutation.mutate("pass")}
                           >
@@ -1030,6 +1118,126 @@ export function CardDrawer({
                             onClick={() => interveneMutation.mutate({ type: "reject" })}
                           >
                             驳回
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {canAdminAction && card.status !== "closed" && (
+                      <div className="drawer-action-dialog">
+                        <div className="dialog-title">
+                          {t("adminAction.title")}
+                          <span className="badge badge-neutral">
+                            {projectRole === "owner" || projectRole === "admin"
+                              ? t("adminAction.levelProject")
+                              : t("adminAction.levelInstance")}
+                          </span>
+                        </div>
+                        <div className="field-hint">{t("adminAction.hint")}</div>
+                        <textarea
+                          className="textarea"
+                          rows={2}
+                          placeholder={t("adminAction.reasonPlaceholder")}
+                          value={adminActionReason}
+                          onChange={(e) => setAdminActionReason(e.target.value)}
+                        />
+                        {card.status === "open" && (
+                          <select
+                            className="select"
+                            value={adminActionTarget}
+                            onChange={(e) => setAdminActionTarget(e.target.value)}
+                          >
+                            <option value="">{t("adminAction.engageLabel")}</option>
+                            {adminActionAgents.map((agent) => (
+                              <option key={agent.id} value={agent.id}>
+                                {agent.resolved_name || agent.slug}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {card.status === "open" && adminActionAgents.length === 0 && (
+                          <div className="field-hint">{t("adminAction.noAgents")}</div>
+                        )}
+                        {card.status === "review" && passBlockedByEvidence && (
+                          <div className="field-hint">{t("adminAction.skipsEvidence")}</div>
+                        )}
+                        {card.status === "running" && (
+                          <div className="field-hint">{t("adminAction.releaseHint")}</div>
+                        )}
+                        {(card.status === "engaged" ||
+                          card.status === "running" ||
+                          card.status === "review") && (
+                          <div className="field-hint">{t("adminAction.resetHint")}</div>
+                        )}
+                        <div className="field-hint">{t("adminAction.cancelHint")}</div>
+                        <div className="form-actions">
+                          {card.status === "open" && (
+                            <button
+                              type="button"
+                              className="btn btn-danger btn-sm"
+                              disabled={
+                                adminActionMutation.isPending ||
+                                !adminActionReady ||
+                                !adminActionTarget
+                              }
+                              onClick={() => adminActionMutation.mutate({ action: "engage" })}
+                            >
+                              {t("adminAction.engage")}
+                            </button>
+                          )}
+                          {card.status === "review" && (
+                            <>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                disabled={adminActionMutation.isPending || !adminActionReady}
+                                onClick={() =>
+                                  adminActionMutation.mutate({ action: "verify", verdict: "reject" })
+                                }
+                              >
+                                {t("adminAction.verifyReject")}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-danger btn-sm"
+                                disabled={adminActionMutation.isPending || !adminActionReady}
+                                onClick={() =>
+                                  adminActionMutation.mutate({ action: "verify", verdict: "pass" })
+                                }
+                              >
+                                {t("adminAction.verifyPass")}
+                              </button>
+                            </>
+                          )}
+                          {card.status === "running" && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={adminActionMutation.isPending || !adminActionReady}
+                              onClick={() => adminActionMutation.mutate({ action: "release" })}
+                            >
+                              {t("adminAction.release")}
+                            </button>
+                          )}
+                          {(card.status === "engaged" ||
+                            card.status === "running" ||
+                            card.status === "review") && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              disabled={adminActionMutation.isPending || !adminActionReady}
+                              onClick={() => adminActionMutation.mutate({ action: "reset" })}
+                            >
+                              {t("adminAction.reset")}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            disabled={adminActionMutation.isPending || !adminActionReady}
+                            onClick={() => adminActionMutation.mutate({ action: "cancel" })}
+                          >
+                            {t("adminAction.cancel")}
                           </button>
                         </div>
                       </div>

@@ -92,13 +92,13 @@ CREATE TABLE projects (
 CREATE TABLE project_members (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role       TEXT NOT NULL CHECK (role IN ('owner','member')),
+  role       TEXT NOT NULL CHECK (role IN ('owner','admin','member')),
   added_by   TEXT NOT NULL REFERENCES users(id),
   added_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   PRIMARY KEY (project_id, user_id)
 );
 CREATE INDEX idx_members_user ON project_members(user_id);
--- 每个项目只有一个 owner；变更走转让。
+-- 每个项目只有一个 owner；变更走转让。admin 是可委托的项目管理员，不占 owner 唯一位。
 CREATE UNIQUE INDEX uq_project_single_owner ON project_members(project_id) WHERE role = 'owner';
 
 CREATE TABLE project_join_requests (
@@ -210,7 +210,8 @@ CREATE TABLE cards (
                        CHECK (status IN ('open','engaged','running','review','closed')),
   outcome            TEXT CHECK (outcome IN ('done','rejected','cancelled','expired')),
   version            INTEGER NOT NULL DEFAULT 1,
-  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 5),
+  -- 普通协商的 5 轮上限由路由层强制（ROUND_LIMIT）；治理 reset 可开 round 6+，DB 上限放宽到 100
+  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 100),
   priority           INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN 0 AND 100),
   requester_agent_id TEXT REFERENCES agents(id),
   assignee_agent_id  TEXT REFERENCES agents(id),
@@ -271,7 +272,7 @@ CREATE TABLE negotiation_sessions (
   initiator_agent_id TEXT REFERENCES agents(id),
   initiator_user_id  TEXT REFERENCES users(id),
   responder_agent_id TEXT NOT NULL REFERENCES agents(id),
-  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 5),
+  round              INTEGER NOT NULL DEFAULT 1 CHECK (round BETWEEN 1 AND 100),
   state              TEXT NOT NULL DEFAULT 'open'
                        CHECK (state IN ('open','committed','failed','cancelled','expired')),
   created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

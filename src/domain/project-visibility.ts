@@ -4,7 +4,7 @@ import type { ProjectRow, UserRow } from "../types";
 export type ProjectAccess = "member" | "admin";
 
 export type VisibleProjectRow = ProjectRow & {
-  role: "owner" | "member";
+  role: "owner" | "admin" | "member";
   access: ProjectAccess;
 };
 

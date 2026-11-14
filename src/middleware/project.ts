@@ -29,7 +29,7 @@ export const requireProjectMember: MiddlewareHandler<AppEnv> = async (c, next) =
     "SELECT role FROM project_members WHERE project_id = ?1 AND user_id = ?2",
   )
     .bind(project.id, user.id)
-    .first<{ role: "owner" | "member" }>();
+    .first<{ role: "owner" | "admin" | "member" }>();
 
   const role = membership?.role ?? (isAdmin(user) ? "owner" : null);
   if (!role) throw new HttpError(404, "NOT_FOUND", "project not found");

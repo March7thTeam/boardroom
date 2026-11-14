@@ -37,8 +37,8 @@ S1 使用**应用内账号 + HttpOnly 会话 Cookie**。Cloudflare Access 仍可
 | `DELETE` | `/api/v1/users/:uid` | admin：软删除（禁用） |
 | `POST` | `/api/v1/users/:uid/revoke-sessions` | admin：撤销全部会话 |
 | `POST` | `/api/v1/users/:uid/password` | admin：重置密码，可选邮件 |
-| `GET/POST` | `/api/v1/projects/:pid/members` | 成员：成员列表；owner：添加已存在用户（只能以 `member` 加入） |
-| `PATCH/DELETE` | `/api/v1/projects/:pid/members/:uid` | owner：修改项目角色（不能提升为 owner）/ 移除成员（不能移除 owner） |
+| `GET/POST` | `/api/v1/projects/:pid/members` | 成员：成员列表；owner：添加已存在用户（`member` 或 `admin`） |
+| `PATCH/DELETE` | `/api/v1/projects/:pid/members/:uid` | owner：修改项目角色（`member`/`admin`，不能提升为 owner）/ 移除成员（不能移除 owner） |
 | `POST` | `/api/v1/projects/:pid/owner` | owner：把所有权转让给现有成员 `{ user_id }`，原 owner 保留为 member |
 | `POST` | `/api/v1/projects/:pid/join-requests` | 登录用户：提交加入项目申请 |
 | `GET` | `/api/v1/join-requests` | 登录用户：我的待审批/已拒绝申请 |
@@ -73,13 +73,21 @@ S1 使用**应用内账号 + HttpOnly 会话 Cookie**。Cloudflare Access 仍可
 3. 提交 `POST /api/v1/setup`：创建 admin、写入 `instance_settings`、可选创建首个项目并返回 enrollment token。
 4. 自动登录并进入看板；`needs_setup` 变为 false。
 
-之后新增用户由管理员在 `POST /api/v1/users` 创建。项目 owner 只能把**已存在用户**加入项目（`POST /api/v1/projects/:pid/members`）；用户不存在时返回 `404 USER_NOT_FOUND`，需先由管理员创建账号。**每个项目只有一个 owner（#14）**：添加成员或修改角色时设为 `owner` 返回 `409 SINGLE_OWNER`；变更 owner 由当前 owner 或实例管理员通过 `POST /api/v1/projects/:pid/owner` 转让，转让在同一批次内完成，原 owner 降为 member。owner 不能被降级或移除（`409 LAST_OWNER`），因此不会再出现「A 邀请 B 成为 owner 后被 B 反向移除」。数据库层由 `uq_project_single_owner` 部分唯一索引兜底；迁移 `0007` 对已有多 owner 的项目保留最早加入的 owner，其余降为 member。
+之后新增用户由管理员在 `POST /api/v1/users` 创建。项目 owner 只能把**已存在用户**加入项目（`POST /api/v1/projects/:pid/members`）；用户不存在时返回 `404 USER_NOT_FOUND`，需先由管理员创建账号。**每个项目只有一个 owner（#14）**：添加成员或修改角色时设为 `owner` 返回 `409 SINGLE_OWNER`；变更 owner 由当前 owner 或实例管理员通过 `POST /api/v1/projects/:pid/owner` 转让，转让在同一批次内完成，原 owner 降为 member。owner 不能被降级或移除（`409 LAST_OWNER`），因此不会再出现「A 邀请 B 成为 owner 后被 B 反向移除」。数据库层由 `uq_project_single_owner` 部分唯一索引兜底。
 
-### 实例管理员与项目角色（#5、#14）
+### 项目角色
 
-- 实例级角色是 `users.role`（前端显示为「实例管理员 / 普通用户」）；项目级角色是 `project_members.role`（「项目所有者 / 项目成员」）。两者在 UI 上使用不同的名称与徽标，不再混用 “admin”。
-- 实例管理员对**非成员**项目拥有隐式 owner 权限（`requireProjectMember` 兜底）。列表口径与之一致：`GET /api/v1/projects` 与 `GET /api/v1/me` 对实例管理员返回全部未归档项目，非成员项目标注 `role: "owner"`、`access: "admin"`；`GET /api/v1/projects/:pid` 同样返回 `access`。非管理员只看到自己的成员项目，行为不变。
-- 实例管理员若在项目中**有**显式成员关系，以该成员角色为准（例如转让所有权后即为 member）。
+项目级角色是 `project_members.role`，取值 `owner` / `admin` / `member`：
+
+- `owner`：每个项目唯一；管理成员、转让所有权、归档项目。
+- `admin`：由 owner 在「项目参与者」面板授予或撤销；可执行卡片的管理员操作，但不能管理成员、转让所有权或归档项目。
+- `member`：普通项目成员；不能使用管理员操作。
+
+owner 在参与者面板通过每位成员的「修改权限」下拉切换 `member` / `admin`；添加成员时也可以直接选择 `admin`。项目管理员不能修改其他成员的角色。
+
+### 实例管理员
+
+实例级角色是 `users.role`（前端显示为「实例管理员 / 普通用户」），与项目级角色使用不同的名称与徽标。实例管理员对**非成员**项目拥有隐式 owner 权限（`requireProjectMember` 兜底）：`GET /api/v1/projects` 与 `GET /api/v1/me` 返回全部未归档项目，非成员项目标注 `role: "owner"`、`access: "admin"`。实例管理员若在项目中**有**显式成员关系，以该成员角色为准。
 
 无项目用户可以在空状态面板输入项目 ID 提交加入申请（`POST /api/v1/projects/:pid/join-requests`）。申请进入 `pending`，项目 owner 在参与者面板批准后才写入 `project_members`；拒绝时只更新申请状态，不影响成员表。待审批申请列表仅 owner 可见。
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { Crown, ShieldCheck } from "lucide-react";
+import { Crown, Shield, ShieldCheck } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { ProjectSummary } from "../types";
 
@@ -42,6 +42,14 @@ export function ProjectRoleBadge({
       <span className="badge badge-project-owner">
         <Crown size={11} aria-hidden="true" />
         {t("participants.roleOwner")}
+      </span>
+    );
+  }
+  if (role === "admin") {
+    return (
+      <span className="badge badge-project-admin">
+        <Shield size={11} aria-hidden="true" />
+        {t("participants.roleAdmin")}
       </span>
     );
   }

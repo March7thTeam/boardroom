@@ -30,7 +30,7 @@ Boardroom 是**协商与证据账本**：Agent 询价/承诺/交付证据，人�
 
 ## 数据与迁移规则
 
-- 当前版本 `0.1.0`（beta）；alpha 的 0001–0010 迁移已合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
+- 当前版本 `0.2.0`（beta）；alpha 的 0001–0010 迁移已合并为单一 `migrations/0001_init.sql`，没有从 alpha 实例原地升级的路径。
 - 改表只新增 `migrations/000N_*.sql`，用 `npm run db:migrate` 应用；不要修改已发布迁移，也不要删库重置。
 - `db/schema.sql` 是当前 schema 快照；不要重新引入升级数据迁移兼容（card_events 回查、审计尾巴重建等均已删除）。
 - 时间统一 `nowIso()` / `addDaysIso()`；ID 用 `newId(prefix)` / ULID。
@@ -44,6 +44,7 @@ Boardroom 是**协商与证据账本**：Agent 询价/承诺/交付证据，人�
 - Agent 是全局身份（`agents`）且**身份彻底项目化**：全局行只承载 harness/展示档案（内部 key `ag_<ulid>`）；项目访问与项目内身份（`local_slug`/`display_name`/`token_version`）完全由 `agent_projects` 决定，`agents.project_id`/`agents.status`/`agent_assignments` 已在 beta 移除。`requireAgent` 校验实际 token 行和目标项目代次；每个 token 只在其签发项目使用；`pending` 仍可访问 `/agent/me`。
 - Agent 卡片的项目访问统一走 `assertAgentProjectAccess`；多项目调用必须传 `project_id`。
 - **Agent 卡片权限**：可创建卡片、关闭/重开**自己创建的**卡片；不能删除，不能操作人类或其他 Agent 的卡片。所有权判定 `created_by_type='agent'` + `created_by_id=agent.id`。
+- **管理员操作（admin-action）**：`POST /cards/:cid/admin-action` 仅对项目 owner（本项目）与实例 admin（实例内任意未归档项目）开放；`engage` 跳过提案直接生成合成 session/proposal/contract 并进入 `engaged`，`verify` 跳过 evidence/verifier 冲突门槛，`cancel` 紧急止损并作废进行中合同/attempt，`release` 把卡死的 `running` 退回 `engaged` 并放弃 ticket/lease，`reset` 把异常状态退回 `open` 并进入下一轮。必须带 reason，写 `card.admin_action` 事件并记录 `skipped_gates`；普通成员 403。请求同样要求 `If-Match: <卡片 version>`（缺失 428，过期 409 `VERSION_CONFLICT`）。详见 `docs/admin-action.md`。
 - Agent 读取 `/agent/cards`：任何 token 都只能返回其绑定项目；显式 `project_id` 指向其他项目一律 `403 CREDENTIAL_SCOPE_MISMATCH`，显式上下文仍校验 active 成员关系，增量分页使用稳定游标。
 - 对外 Agent 引用一律用 `<project_id>:<local_slug>`（scoped ref）；`resolveProjectAgentReference` 不接受 internal ID 回退。`/projects/:pid/agents` 与 `/agent/peers` 返回 scoped 公开 ID；legacy 状态端点 `/api/v1/agents/:aid/status` 已删除，启停统一走 `/api/v1/projects/:pid/agents/:aid/status`。
 - `X-Dev-Email` / `?dev_email=` 绕过仅限 `ENVIRONMENT=development`；生产必须关闭。
