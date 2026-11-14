@@ -6,6 +6,7 @@ import { HttpError } from "./lib/http-error";
 import { resolveLocale } from "./middleware/locale";
 import { requestId } from "./middleware/request-id";
 import { agentApiRoutes } from "./routes/agent-api";
+import { agentMemoryRoutes } from "./routes/agent-memory";
 import { agentRoutes } from "./routes/agents";
 import { adminRoutes } from "./routes/admin";
 import { auditRoutes } from "./routes/audit";
@@ -15,6 +16,7 @@ import { eventRoutes } from "./routes/events";
 import { healthRoutes } from "./routes/health";
 import { languageRoutes, localeRoutes } from "./routes/locale";
 import { meRoutes } from "./routes/me";
+import { memoryRoutes } from "./routes/memory";
 import { projectJoinRoutes } from "./routes/project-join";
 import { projectRoutes } from "./routes/projects";
 import { setupRoutes } from "./routes/setup";
@@ -82,9 +84,11 @@ app.route("/api/v1", projectRoutes);
 app.route("/api/v1", projectJoinRoutes);
 app.route("/api/v1", agentRoutes);
 app.route("/api/v1", cardRoutes);
+app.route("/api/v1", memoryRoutes);
 app.route("/api/v1", eventRoutes);
 app.route("/api/v1", auditRoutes);
 app.route("/agent", agentApiRoutes);
+app.route("/agent", agentMemoryRoutes);
 app.route("/", languageRoutes);
 
 async function setupNeeded(env: Env): Promise<boolean> {

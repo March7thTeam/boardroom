@@ -425,3 +425,97 @@ CREATE TABLE project_event_heads (
   seq INTEGER NOT NULL,
   hash TEXT NOT NULL
 );
+
+-- ---------- 记忆空间（P1：1 项目 : 1 空间 + 引用凭据） ----------
+-- 详见 migrations/0004_memory_spaces.sql 与 GitHub #11。
+CREATE TABLE memory_spaces (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+  slug        TEXT NOT NULL UNIQUE,
+  name        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  archived_at TEXT
+);
+
+CREATE TABLE memory_entries (
+  id              TEXT PRIMARY KEY,
+  space_id        TEXT NOT NULL REFERENCES memory_spaces(id) ON DELETE CASCADE,
+  project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title           TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  tags_json       TEXT NOT NULL DEFAULT '[]',
+  status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
+  version         INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  source_card_id  TEXT REFERENCES cards(id) ON DELETE SET NULL,
+  created_by_type TEXT NOT NULL CHECK (created_by_type IN ('agent','user','system')),
+  created_by_id   TEXT NOT NULL,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX idx_memory_entries_sync ON memory_entries(space_id, updated_at, id);
+CREATE INDEX idx_memory_entries_status ON memory_entries(space_id, status, updated_at);
+
+CREATE TABLE memory_revisions (
+  id         TEXT PRIMARY KEY,
+  entry_id   TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  body_hash  TEXT NOT NULL,
+  actor_type TEXT NOT NULL CHECK (actor_type IN ('agent','user','system')),
+  actor_id   TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (entry_id, version)
+);
+
+CREATE TABLE memory_ref_grants (
+  id              TEXT PRIMARY KEY,
+  entry_id        TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
+  entry_version   INTEGER NOT NULL,
+  content_sha256  TEXT NOT NULL,
+  to_project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  granted_by_type TEXT NOT NULL CHECK (granted_by_type IN ('agent','user','system')),
+  granted_by_id   TEXT NOT NULL,
+  granted_at      TEXT NOT NULL,
+  expires_at      TEXT,
+  revoked_at      TEXT,
+  revoked_reason  TEXT
+);
+CREATE UNIQUE INDEX uq_memory_grant_live
+  ON memory_ref_grants(entry_id, entry_version, to_project_id) WHERE revoked_at IS NULL;
+CREATE INDEX idx_memory_grant_target ON memory_ref_grants(to_project_id, revoked_at);
+
+CREATE TABLE memory_refs (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  space_id         TEXT NOT NULL REFERENCES memory_spaces(id) ON DELETE CASCADE,
+  grant_id         TEXT NOT NULL UNIQUE REFERENCES memory_ref_grants(id) ON DELETE CASCADE,
+  source_entry_id  TEXT NOT NULL,
+  source_version   INTEGER NOT NULL,
+  content_sha256   TEXT NOT NULL,
+  title            TEXT NOT NULL,
+  imported_by_type TEXT NOT NULL CHECK (imported_by_type IN ('agent','user','system')),
+  imported_by_id   TEXT NOT NULL,
+  imported_at      TEXT NOT NULL,
+  revoked_at       TEXT
+);
+CREATE INDEX idx_memory_refs_space ON memory_refs(space_id, imported_at);
+
+CREATE UNIQUE INDEX uq_outbox_project_message
+  ON event_outbox(project_id, message_id)
+  WHERE card_id IS NULL AND message_id IS NOT NULL;
+
+CREATE TRIGGER trg_memory_entries_space_guard_insert
+BEFORE INSERT ON memory_entries
+FOR EACH ROW WHEN (SELECT project_id FROM memory_spaces WHERE id = NEW.space_id) <> NEW.project_id
+BEGIN
+  SELECT RAISE(ABORT, 'memory_entries.project_id must match its space project');
+END;
+
+CREATE TRIGGER trg_memory_entries_space_guard_update
+BEFORE UPDATE OF space_id, project_id ON memory_entries
+FOR EACH ROW WHEN (SELECT project_id FROM memory_spaces WHERE id = NEW.space_id) <> NEW.project_id
+BEGIN
+  SELECT RAISE(ABORT, 'memory_entries.project_id must match its space project');
+END;

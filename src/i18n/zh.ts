@@ -98,4 +98,10 @@ export const zh: Record<keyof typeof en, string> = {
 
   "error.SELF_DEAL_COOLDOWN": "请等待卡片冷静期结束后再自接。",
 
+  "error.SECRET_DETECTED": "内容疑似包含凭据，已拒绝写入；请移除后重试。",
+  "error.GRANT_REVOKED": "该记忆引用凭据已撤销。",
+  "error.GRANT_EXPIRED": "该记忆引用凭据已过期。",
+  "error.CONTENT_HASH_MISMATCH": "引用内容与凭据记录的哈希不一致，已拒绝返回。",
+  "error.SOURCE_UNAVAILABLE": "源记忆条目在凭据绑定的版本上已不可用。",
+
 };

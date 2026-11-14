@@ -134,8 +134,13 @@ export async function commitCardEvent(
     catch { throw error; }
     if (row && sameCommand(row, command, payload, receipt, createdAt)) return committed(row, false);
     if (command.messageId && command.requestHash) {
-      const previous = await db.prepare("SELECT * FROM event_outbox WHERE card_id = ?1 AND message_id = ?2")
-        .bind(command.cardId, command.messageId).first<OutboxRow>();
+      // Project-level events (memory) carry card_id = NULL, and SQLite's `= NULL`
+      // never matches, so the replay lookup needs an IS NULL branch.
+      const previous = command.cardId === null
+        ? await db.prepare("SELECT * FROM event_outbox WHERE project_id = ?1 AND card_id IS NULL AND message_id = ?2")
+          .bind(command.projectId, command.messageId).first<OutboxRow>()
+        : await db.prepare("SELECT * FROM event_outbox WHERE card_id = ?1 AND message_id = ?2")
+          .bind(command.cardId, command.messageId).first<OutboxRow>();
       if (previous) {
         if (previous.request_hash !== command.requestHash || previous.actor_id !== command.actorId || previous.actor_type !== command.actorType) {
           throw new HttpError(409, "CONFLICT", "message_id already belongs to a different request");
