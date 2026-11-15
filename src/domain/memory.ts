@@ -59,8 +59,8 @@ export interface EntryRow {
 
 export interface LinkRow {
   id: string;
-  entry_id: string;
-  from_project_id: string;
+  entry_id: string | null;
+  from_project_id: string | null;
   to_project_id: string;
   state: "pending_source" | "pending_target" | "active" | "rejected" | "revoked";
   requested_by_type: "agent" | "user" | "system";
@@ -78,7 +78,6 @@ export interface LinkRow {
   frozen_title: string | null;
   frozen_body: string | null;
   frozen_body_hash: string | null;
-  frozen_version: number | null;
   frozen_at: string | null;
 }
 
@@ -328,8 +327,16 @@ function assertEntryWriter(entry: EntryRow, actor: Actor): void {
 
 export async function deleteEntry(
   c: Context<AppEnv>,
-  input: { projectId: string; actor: Actor; entryId: string; expectedVersion: number; messageId?: string | null },
-): Promise<{ entry_id: string; version: number; event: Record<string, unknown> }> {
+  input: {
+    projectId: string;
+    actor: Actor;
+    entryId: string;
+    expectedVersion: number;
+    messageId?: string | null;
+    /** 误写内容需要立刻切断时使用：同一批里把该条目的未结束链接全部撤销。 */
+    revokeLinks?: boolean;
+  },
+): Promise<{ entry_id: string; version: number; revoked_links: number; event: Record<string, unknown> }> {
   const db = c.env.DB;
   const current = await loadEntry(db, input.entryId);
   if (current.project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory entry not found");
@@ -344,8 +351,15 @@ export async function deleteEntry(
   const update = db
     .prepare("UPDATE memory_entries SET status = 'deleted', version = version + 1, updated_at = ?1 WHERE id = ?2 AND version = ?3 AND status = 'active'")
     .bind(now, input.entryId, input.expectedVersion);
+  const statements: D1PreparedStatement[] = [update];
+  if (input.revokeLinks) {
+    statements.push(db
+      .prepare(`UPDATE memory_entry_links SET state = 'revoked', revoked_by = ?1, revoked_at = ?2
+        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')`)
+      .bind(input.actor.id, now, input.entryId));
+  }
 
-  const result = await commitAndPublish(c, update, {
+  const result = await commitAndPublish(c, statements, {
     projectId: current.project_id,
     cardId: null,
     eventType: "memory.entry_deleted",
@@ -356,9 +370,14 @@ export async function deleteEntry(
     receipt: { entry_id: input.entryId, version: nextVersion },
   });
   if (!result) throw new HttpError(409, "VERSION_CONFLICT", "memory entry changed while deleting");
+  const revoked = await db
+    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked'")
+    .bind(input.entryId)
+    .first<{ c: number }>();
   return {
     entry_id: input.entryId,
     version: nextVersion,
+    revoked_links: revoked?.c ?? 0,
     event: {
       seq: result.seq,
       event_id: result.event_id,
@@ -379,9 +398,9 @@ export async function setShareable(
   const db = c.env.DB;
   const entry = await loadEntry(db, input.entryId);
   if (entry.project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory entry not found");
-  if (entry.status !== "active") throw new HttpError(409, "CARD_STATE_INVALID", "memory entry is deleted");
-  if (input.actor.type === "agent" && entry.created_by_id !== input.actor.id) {
-    throw new HttpError(403, "FORBIDDEN", "agents may only change the sharing flag of their own entries");
+  // 对外可见是人类的决定：agent 无论是否作者都不能自行打开或关闭。
+  if (input.actor.type !== "user") {
+    throw new HttpError(403, "FORBIDDEN", "only humans can change the sharing flag");
   }
 
   const next = input.shareable ? 1 : 0;
@@ -513,6 +532,7 @@ export async function approveLink(
 
   const expectedProject = input.side === "source" ? link.from_project_id : link.to_project_id;
   if (expectedProject !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  if (!link.entry_id) throw new HttpError(409, "SOURCE_UNAVAILABLE", "source memory entry is no longer available");
   const entry = await loadEntry(db, link.entry_id);
 
   const now = nowIso();
@@ -535,9 +555,9 @@ export async function approveLink(
     statement = db
       .prepare(`UPDATE memory_entry_links
         SET state = ?1, target_approved_by = ?2, target_approved_at = ?3,
-            frozen_title = ?5, frozen_body = ?6, frozen_body_hash = ?7, frozen_version = ?8, frozen_at = ?3
+            frozen_title = ?5, frozen_body = ?6, frozen_body_hash = ?7, frozen_at = ?3
         WHERE id = ?4 AND state = 'pending_target'`)
-      .bind(nextState, input.actor.id, now, link.id, entry.title, entry.body, entry.body_hash, entry.version);
+      .bind(nextState, input.actor.id, now, link.id, entry.title, entry.body, entry.body_hash);
   }
 
   const result = await commitAndPublish(c, statement, {
@@ -668,57 +688,46 @@ export async function listLinks(db: D1Database, projectId: string): Promise<Link
  */
 export async function listPointers(
   db: D1Database,
-  agentId: string,
+  _agentId: string,
   targetProjectId: string,
-): Promise<Array<{ link: LinkRow; entry: { id: string; title: string; version: number; source_deleted: boolean } }>> {
-  const rows = await db
-    .prepare(`SELECT l.id AS link_id
-      FROM memory_entry_links l
-      JOIN agent_projects ap
-        ON ap.agent_id = ?1 AND ap.project_id = l.from_project_id AND ap.status = 'active'
-      WHERE l.to_project_id = ?2 AND l.state = 'active'
-      ORDER BY l.target_approved_at DESC
-      LIMIT 200`)
-    .bind(agentId, targetProjectId)
-    .all<{ link_id: string }>();
+): Promise<Array<{ link: LinkRow; entry: { id: string; title: string; source_deleted: boolean } }>> {
+  // 快照归目标项目：只看目标项目，不再要求读者在源项目里。
+  const links = await db
+    .prepare(`SELECT * FROM memory_entry_links
+      WHERE to_project_id = ?1 AND state = 'active'
+      ORDER BY target_approved_at DESC LIMIT 200`)
+    .bind(targetProjectId)
+    .all<LinkRow>();
 
-  const ids = rows.results.map((row) => row.link_id);
-  // 本项目 SQL 一律用编号占位符（?N）：测试垫片只重写 ?N，裸 ? 会丢绑定。
-  const links = ids.length
-    ? await db
-      .prepare(`SELECT * FROM memory_entry_links WHERE id IN (${ids.map((_, index) => `?${index + 1}`).join(",")})`)
-      .bind(...ids)
-      .all<LinkRow>()
-    : { results: [] as LinkRow[] };
-
+  const ids = links.results
+    .map((link) => link.entry_id)
+    .filter((id): id is string => typeof id === "string");
   const alive = new Map<string, boolean>();
-  for (const link of links.results) {
-    if (alive.has(link.entry_id)) continue;
-    const entry = await db
-      .prepare("SELECT status FROM memory_entries WHERE id = ?1")
-      .bind(link.entry_id)
-      .first<{ status: string }>();
-    alive.set(link.entry_id, Boolean(entry) && entry!.status === "active");
+  if (ids.length) {
+    const rows = await db
+      .prepare(`SELECT id, status FROM memory_entries WHERE id IN (${ids.map((_, index) => `?${index + 1}`).join(",")})`)
+      .bind(...ids)
+      .all<{ id: string; status: string }>();
+    for (const row of rows.results) alive.set(row.id, row.status === "active");
   }
 
   return links.results.map((link) => ({
     link,
     entry: {
-      id: link.entry_id,
+      id: link.entry_id ?? "",
       title: link.frozen_title ?? "",
-      version: link.frozen_version ?? 0,
-      source_deleted: !alive.get(link.entry_id),
+      source_deleted: Boolean(link.entry_id) ? !alive.get(link.entry_id!) : true,
     },
   }));
 }
 
 /**
- * 通过链接读取内容。服务的是链接生效时冻结的快照，因此源条目删除后依然可读，
- * 只把 `source_deleted` 置为 true —— 目标项目已获得的记忆不会被源侧撤销。
+ * 通过链接读取内容。服务的是链接生效时冻结的快照，且**只校验目标项目**：
+ * 源条目/源项目即使被物理删除，目标项目照旧可读，只把 source_missing 置真。
  */
 export async function readPointer(
   db: D1Database,
-  agentId: string,
+  _agentId: string,
   targetProjectId: string,
   linkId: string,
 ): Promise<{
@@ -727,7 +736,6 @@ export async function readPointer(
     id: string;
     title: string;
     body: string;
-    version: number;
     body_hash: string;
     source_deleted: boolean;
     source_missing: boolean;
@@ -738,24 +746,17 @@ export async function readPointer(
   if (link.state !== "active") {
     throw new HttpError(410, link.state === "revoked" ? "LINK_REVOKED" : "LINK_INACTIVE", `memory link is ${link.state}`);
   }
-  const member = await db
-    .prepare("SELECT 1 AS ok FROM agent_projects WHERE agent_id = ?1 AND project_id = ?2 AND status = 'active'")
-    .bind(agentId, link.from_project_id)
-    .first<{ ok: number }>();
-  if (!member) throw new HttpError(403, "FORBIDDEN", "the agent is not active in the source project");
 
-  const source = await db
-    .prepare("SELECT status FROM memory_entries WHERE id = ?1")
-    .bind(link.entry_id)
-    .first<{ status: string }>();
+  const source = link.entry_id
+    ? await db.prepare("SELECT status FROM memory_entries WHERE id = ?1").bind(link.entry_id).first<{ status: string }>()
+    : null;
 
   return {
     link,
     entry: {
-      id: link.entry_id,
+      id: link.entry_id ?? "",
       title: link.frozen_title ?? "",
       body: link.frozen_body ?? "",
-      version: link.frozen_version ?? 0,
       body_hash: link.frozen_body_hash ?? "",
       source_deleted: !source || source.status !== "active",
       source_missing: !source,

@@ -5,6 +5,7 @@ import type { AppEnv } from "../context";
 import {
   approveLink,
   createEntry,
+  deleteEntry,
   findExistingProjectEvent,
   listEntries,
   listLinks,
@@ -146,6 +147,29 @@ memoryRoutes.post("/projects/:pid/memory/entries", requireUser, requireProjectMe
     messageId: body.message_id ?? null,
   });
   return c.json({ entry: result.entry, ...result.event }, 201);
+});
+
+memoryRoutes.delete("/projects/:pid/memory/entries/:eid", requireUser, requireProjectMember, async (c) => {
+  const project = c.get("project");
+  const actor = humanActor(c);
+  const version = expectedVersion(c);
+  const revokeLinks = ["1", "true"].includes((c.req.query("revoke_links") ?? "").toLowerCase());
+  const messageId = c.req.query("message_id") ?? null;
+
+  if (messageId) {
+    const previous = await findExistingProjectEvent(c, project.id, messageId);
+    if (previous) return c.json({ ...previous }, 200);
+  }
+
+  const result = await deleteEntry(c, {
+    projectId: project.id,
+    actor,
+    entryId: c.req.param("eid"),
+    expectedVersion: version,
+    messageId,
+    revokeLinks,
+  });
+  return c.json(result);
 });
 
 memoryRoutes.post("/projects/:pid/memory/entries/:eid/shareable", requireUser, requireProjectMember, async (c) => {

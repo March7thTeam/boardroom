@@ -250,35 +250,33 @@ describe("project memory spaces (P1)", () => {
     expect(published).toContain("memory.link_activated");
   });
 
-  it("only agents active in BOTH projects see and can read the pointer", async () => {
+  it("serves the snapshot to target-project members only", async () => {
     const { call, createSharedEntry, db } = await fixture();
     const entryId = await createSharedEntry(true);
     const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
     const linkId = requested.body.link!.id;
     await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
     await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
-    // dual：两个项目都 active，能看到并能读。
-    const dualList = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
-    // dual 同时是两个项目的 active 成员
-    expect(dualList.status, JSON.stringify(dualList.body)).toBe(200);
-    expect(dualList.body.pointers).toHaveLength(1);
-    expect(dualList.body.pointers![0]).toMatchObject({ link_id: linkId, entry_id: entryId, title: "Release checklist" });
 
-    const dualRead = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
-    expect(dualRead.status, JSON.stringify(dualRead.body)).toBe(200);
-    expect(dualRead.body.entry).toMatchObject({ id: entryId, body: "step 1" });
+    // b-bot 只在目标项目：快照属于目标项目，它可以看见并读取。
+    const list = await call("/agent/memory/pointers", {}, { method: "GET", agent: "b" });
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    expect(list.body.pointers).toHaveLength(1);
+    expect(list.body.pointers![0]).toMatchObject({ link_id: linkId, entry_id: entryId, title: "Release checklist" });
 
-    // b-bot 只在 B：链接可见但读取被拒（不在源项目）。
-    const onlyBList = await call("/agent/memory/pointers", {}, { method: "GET", agent: "b" });
-    expect(onlyBList.status).toBe(200);
-    expect(onlyBList.body.pointers).toEqual([]);
+    const read = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.entry).toMatchObject({ id: entryId, body: "step 1", source_deleted: false, source_missing: false });
 
-    // 断开 dual 在源项目的成员关系：指针立即消失。
+    // 源项目 agent（非目标项目成员）读不到这条链接。
+    const sourceOnly = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "a" });
+    expect(sourceOnly.status).toBe(404);
+
+    // 目标项目成员关系被停用后，鉴权层直接拒绝。
     db.sqlite.exec(`UPDATE agent_projects SET status='disabled'
-      WHERE agent_id='${PRJ_A}:dual' AND project_id='${PRJ_A}'`);
-    const afterDisable = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
-    expect(afterDisable.status).toBe(200);
-    expect(afterDisable.body.pointers).toEqual([]);
+      WHERE agent_id='${PRJ_B}:b-bot' AND project_id='${PRJ_B}'`);
+    const disabled = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(disabled.status).toBe(403);
   });
 
   it("revoking the link or turning shareable off cuts access immediately", async () => {
@@ -309,7 +307,37 @@ describe("project memory spaces (P1)", () => {
     expect(off.body.revoked_links).toBe(1);
   });
 
-  it("keeps serving the frozen snapshot after the source entry is deleted", async () => {
+  it("keeps the frozen snapshot readable after the source entry is deleted", async () => {
+    const { call, createSharedEntry, db } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+
+    // 默认删除：保留快照，目标项目仍然可读，只多一个标记。
+    const deleted = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect((deleted.body as unknown as { revoked_links: number }).revoked_links).toBe(0);
+
+    const after = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    const entry = (after.body as unknown as { entry: { body: string; source_deleted: boolean; source_missing: boolean } }).entry;
+    expect(entry.body).toBe("step 1");
+    expect(entry.source_deleted).toBe(true);
+    expect(entry.source_missing).toBe(false);
+
+    // 源行被物理删除：快照与链接都在（FK 是 SET NULL），只是 source_missing。
+    db.sqlite.exec(`DELETE FROM memory_entries WHERE id='${entryId}'`);
+    const physical = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(physical.status, JSON.stringify(physical.body)).toBe(200);
+    const ghost = (physical.body as unknown as { entry: { body: string; source_deleted: boolean; source_missing: boolean } }).entry;
+    expect(ghost.body).toBe("step 1");
+    expect(ghost.source_deleted).toBe(true);
+    expect(ghost.source_missing).toBe(true);
+  });
+
+  it("supports an atomic delete-with-revoke for containment", async () => {
     const { call, createSharedEntry } = await fixture();
     const entryId = await createSharedEntry(true);
     const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
@@ -317,24 +345,25 @@ describe("project memory spaces (P1)", () => {
     await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
     await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
 
-    const before = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
-    expect(before.status).toBe(200);
-    expect((before.body as unknown as { entry: { source_deleted: boolean } }).entry.source_deleted).toBe(false);
-
-    // 源项目删除条目：链接已冻结内容，目标项目仍然可读。
-    const deleted = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    const deleted = await call(`/agent/memory/entries/${entryId}?revoke_links=1`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
     expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect((deleted.body as unknown as { revoked_links: number }).revoked_links).toBe(1);
 
-    const after = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
-    expect(after.status, JSON.stringify(after.body)).toBe(200);
-    const entry = (after.body as unknown as { entry: { body: string; source_deleted: boolean; source_missing: boolean } }).entry;
-    expect(entry.body).toBe("step 1");
-    expect(entry.source_deleted).toBe(true);
-    expect(entry.source_missing).toBe(false);
+    const read = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(read.status).toBe(410);
+    expect(read.body.error?.code).toBe("LINK_REVOKED");
+  });
 
-    const list = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
-    expect(list.body.pointers).toHaveLength(1);
-    expect((list.body.pointers![0] as unknown as { source_deleted: boolean }).source_deleted).toBe(true);
+  it("keeps shareable a human-only switch", async () => {
+    const { call, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry(false);
+    // agent 侧根本没有开关路由（只能用人类接口，而它要求人类会话）。
+    const asAgent = await call(`/agent/memory/entries/${entryId}/shareable`, { shareable: true }, { agent: "a" });
+    expect(asAgent.status).toBe(404);
+
+    // 普通成员（非作者、非 owner/admin）也不能替别人打开。
+    const guest = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: true }, { email: "guest@example.test" });
+    expect(guest.status).toBe(403);
   });
 
   it("keeps the agent scope: entries are only visible inside their own project", async () => {

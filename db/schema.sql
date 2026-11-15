@@ -462,8 +462,9 @@ CREATE INDEX idx_memory_entries_status ON memory_entries(space_id, status, updat
 -- 跨项目链接：源项目与目标项目的人类各确认一次才 active。申请方可以是 agent。
 CREATE TABLE memory_entry_links (
   id                 TEXT PRIMARY KEY,
-  entry_id           TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
-  from_project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  -- SET NULL 而非 CASCADE：源条目/源项目被物理删除后，冻结快照必须留在目标项目。
+  entry_id           TEXT REFERENCES memory_entries(id) ON DELETE SET NULL,
+  from_project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
   to_project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   state              TEXT NOT NULL DEFAULT 'pending_source'
                        CHECK (state IN ('pending_source','pending_target','active','rejected','revoked')),
@@ -483,7 +484,6 @@ CREATE TABLE memory_entry_links (
   frozen_title       TEXT,
   frozen_body        TEXT,
   frozen_body_hash   TEXT,
-  frozen_version     INTEGER,
   frozen_at          TEXT,
   CHECK (from_project_id <> to_project_id),
   CHECK (state <> 'active' OR (frozen_body IS NOT NULL AND frozen_body_hash IS NOT NULL))
@@ -519,7 +519,16 @@ END;
 -- 链接的来源项目必须与条目所属项目一致，避免伪造来源。
 CREATE TRIGGER trg_memory_link_source_guard_insert
 BEFORE INSERT ON memory_entry_links
-FOR EACH ROW WHEN (SELECT project_id FROM memory_entries WHERE id = NEW.entry_id) <> NEW.from_project_id
+FOR EACH ROW WHEN NEW.from_project_id IS NOT NULL
+  AND (SELECT project_id FROM memory_entries WHERE id = NEW.entry_id) <> NEW.from_project_id
+BEGIN
+  SELECT RAISE(ABORT, 'memory_entry_links.from_project_id must match the entry project');
+END;
+
+CREATE TRIGGER trg_memory_link_source_guard_update
+BEFORE UPDATE OF entry_id, from_project_id ON memory_entry_links
+FOR EACH ROW WHEN NEW.from_project_id IS NOT NULL AND NEW.entry_id IS NOT NULL
+  AND (SELECT project_id FROM memory_entries WHERE id = NEW.entry_id) <> NEW.from_project_id
 BEGIN
   SELECT RAISE(ABORT, 'memory_entry_links.from_project_id must match the entry project');
 END;

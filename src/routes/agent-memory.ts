@@ -142,13 +142,14 @@ agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
   const actor = agentActor(c);
   const entryId = c.req.param("eid");
   const messageId = c.req.query("message_id") ?? null;
+  const revokeLinks = ["1", "true"].includes((c.req.query("revoke_links") ?? "").toLowerCase());
 
   if (messageId) {
     const previous = await findExistingProjectEvent(c, projectId, messageId);
     if (previous) return c.json({ ...previous }, 200);
   }
 
-  const result = await deleteEntry(c, { projectId, actor, entryId, expectedVersion: version, messageId });
+  const result = await deleteEntry(c, { projectId, actor, entryId, expectedVersion: version, messageId, revokeLinks });
   return c.json(result);
 });
 
@@ -162,7 +163,6 @@ agentMemoryRoutes.get("/memory/pointers", requireAgent, async (c) => {
       link_id: link.id,
       entry_id: entry.id,
       title: entry.title,
-      version: entry.version,
       source_deleted: entry.source_deleted,
       from_project_id: link.from_project_id,
       activated_at: link.target_approved_at,

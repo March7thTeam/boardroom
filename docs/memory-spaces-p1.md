@@ -133,7 +133,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 配额 | 超 2000 条 → 409 `QUOTA_EXCEEDED` |
 | 隔离 | 无链接时跨项目读取一律 404 |
 
-## 11. 当前 PR #22 的差异清单（按本规格需改）
+## 11. 差异清单（已按本规格改完，PR #22 仍为 draft）
 
 1. `readPointer` / `listPointers` 去掉源项目成员校验，改为目标项目成员校验。
 2. `entry_id`、`from_project_id` 改 `SET NULL`，放宽非空约束，改触发器，补物理删除测试。
@@ -141,4 +141,4 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 4. `setShareable` 拒绝 agent（当前允许 agent 改自己创建的条目）。
 5. 迁移去掉 `frozen_version`。
 
-在规格确认前不再提交功能代码。
+以上 5 项已在 `feat/memory-spaces-p1` 上落地，PR 保持 draft，等待规格确认后再请求 review。
