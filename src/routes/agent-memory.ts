@@ -6,11 +6,11 @@ import {
   createEntry,
   deleteEntry,
   findExistingProjectEvent,
-  importRef,
   listEntries,
-  listRefs,
+  listPointers,
   loadEntry,
-  readRef,
+  readPointer,
+  requestLink,
   spaceFor,
   updateEntry,
   type Actor,
@@ -64,8 +64,8 @@ const entryInput = z.object({
   project_id: z.string().trim().min(1).max(64).optional(),
 });
 
-const refInput = z.object({
-  grant_id: z.string().trim().min(1).max(64),
+const linkInput = z.object({
+  entry_id: z.string().trim().min(1).max(64),
   message_id: z.string().trim().min(1).max(200).optional(),
   project_id: z.string().trim().min(1).max(64).optional(),
 });
@@ -82,19 +82,23 @@ function agentActor(c: { get(key: "agent"): { id: string } }): Actor {
 /** 空间概览：1 项目 : 1 空间，所以这里最多返回一个空间。 */
 agentMemoryRoutes.get("/memory", requireAgent, async (c) => {
   const projectId = assertScope(c, c.req.query("project_id"));
+  const agent = c.get("agent");
   const space = await spaceFor(c.env.DB, projectId);
-  if (!space) return c.json({ project_id: projectId, space: null, entry_count: 0, ref_count: 0 });
+  if (!space) return c.json({ project_id: projectId, space: null, entry_count: 0, pointer_count: 0 });
   const counts = await c.env.DB
     .prepare(`SELECT
       (SELECT COUNT(*) FROM memory_entries WHERE space_id = ?1 AND status = 'active') AS entry_count,
-      (SELECT COUNT(*) FROM memory_refs WHERE space_id = ?1) AS ref_count`)
-    .bind(space.id)
-    .first<{ entry_count: number; ref_count: number }>();
+      (SELECT COUNT(*) FROM memory_entry_links l
+        JOIN memory_entries e ON e.id = l.entry_id
+        JOIN agent_projects ap ON ap.agent_id = ?2 AND ap.project_id = l.from_project_id AND ap.status = 'active'
+        WHERE l.to_project_id = ?3 AND l.state = 'active' AND e.status = 'active') AS pointer_count`)
+    .bind(space.id, agent.id, projectId)
+    .first<{ entry_count: number; pointer_count: number }>();
   return c.json({
     project_id: projectId,
     space: { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at },
     entry_count: counts?.entry_count ?? 0,
-    ref_count: counts?.ref_count ?? 0,
+    pointer_count: counts?.pointer_count ?? 0,
   });
 });
 
@@ -174,15 +178,26 @@ agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
   return c.json(result);
 });
 
-agentMemoryRoutes.get("/memory/refs", requireAgent, async (c) => {
+agentMemoryRoutes.get("/memory/pointers", requireAgent, async (c) => {
   const projectId = assertScope(c, c.req.query("project_id"));
-  const space = await spaceFor(c.env.DB, projectId);
-  if (!space) return c.json({ project_id: projectId, refs: [] });
-  return c.json({ project_id: projectId, refs: await listRefs(c.env.DB, space.id) });
+  const agent = c.get("agent");
+  const pointers = await listPointers(c.env.DB, agent.id, projectId);
+  return c.json({
+    project_id: projectId,
+    pointers: pointers.map(({ link, entry }) => ({
+      link_id: link.id,
+      entry_id: entry.id,
+      title: entry.title,
+      version: entry.version,
+      from_project_id: link.from_project_id,
+      activated_at: link.target_approved_at,
+    })),
+  });
 });
 
-agentMemoryRoutes.post("/memory/refs", requireAgent, async (c) => {
-  const body = await parseBody(c, refInput);
+/** 发起链接申请：agent 只能申请，须由源项目与目标项目的人类各确认一次。 */
+agentMemoryRoutes.post("/memory/links", requireAgent, async (c) => {
+  const body = await parseBody(c, linkInput);
   const projectId = assertScope(c, body.project_id);
   const actor = agentActor(c);
 
@@ -191,31 +206,28 @@ agentMemoryRoutes.post("/memory/refs", requireAgent, async (c) => {
     if (previous) return c.json({ ...previous }, 200);
   }
 
-  const result = await importRef(c, { projectId, actor, grantId: body.grant_id, messageId: body.message_id ?? null });
-  return c.json({ ref: result.ref, ...result.event }, 201);
+  const result = await requestLink(c, {
+    toProjectId: projectId,
+    entryId: body.entry_id,
+    actor,
+    messageId: body.message_id ?? null,
+  });
+  return c.json({ link: result.link, ...result.event }, 201);
 });
 
-agentMemoryRoutes.get("/memory/refs/:rid", requireAgent, async (c) => {
+agentMemoryRoutes.get("/memory/pointers/:lid", requireAgent, async (c) => {
   const projectId = assertScope(c, c.req.query("project_id"));
-  const { ref, grant, entry } = await readRef(c.env.DB, projectId, c.req.param("rid"));
+  const agent = c.get("agent");
+  const { link, entry } = await readPointer(c.env.DB, agent.id, projectId, c.req.param("lid"));
   return c.json({
-    ref: {
-      id: ref.id,
-      grant_id: ref.grant_id,
-      source_entry_id: ref.source_entry_id,
-      source_version: ref.source_version,
-      content_sha256: ref.content_sha256,
-      title: ref.title,
-      imported_at: ref.imported_at,
-    },
-    provenance: {
-      granted_by: { type: grant.granted_by_type, id: grant.granted_by_id },
-      granted_at: grant.granted_at,
-      expires_at: grant.expires_at,
+    link: {
+      id: link.id,
+      entry_id: link.entry_id,
+      from_project_id: link.from_project_id,
+      to_project_id: link.to_project_id,
+      state: link.state,
+      activated_at: link.target_approved_at,
     },
     entry,
   });
 });
-
-/** 供人类接口复用：确认条目存在且属于该项目。 */
-export { loadEntry };

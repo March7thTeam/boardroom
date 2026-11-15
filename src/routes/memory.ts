@@ -3,16 +3,20 @@ import type { Context } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../context";
 import {
+  approveLink,
   createEntry,
   findExistingProjectEvent,
-  issueGrant,
   listEntries,
-  listRefs,
+  listLinks,
   loadEntry,
-  revokeGrant,
+  rejectLink,
+  requestLink,
+  revokeLink,
+  setShareable,
   spaceFor,
   updateEntry,
   type Actor,
+  type LinkRow,
 } from "../domain/memory";
 import { HttpError } from "../lib/http-error";
 import { parseBody } from "../lib/http";
@@ -55,35 +59,62 @@ const updateInput = entryInput.extend({
   message_id: z.string().trim().min(1).max(200).optional(),
 });
 
-const grantInput = z.object({
-  to_project_id: z.string().trim().min(1).max(64),
-  ttl_hours: z.number().int().min(1).max(24 * 365).optional(),
+const shareableInput = z.object({
+  shareable: z.boolean(),
   message_id: z.string().trim().min(1).max(200).optional(),
 });
 
-const revokeInput = z.object({
+/** 申请链接：pid 是目标项目，entry_id 来自另一个项目。 */
+const linkInput = z.object({
+  entry_id: z.string().trim().min(1).max(64),
+  message_id: z.string().trim().min(1).max(200).optional(),
+});
+
+const linkActionInput = z.object({
   reason: z.string().trim().max(500).optional(),
   message_id: z.string().trim().min(1).max(200).optional(),
 });
+
+async function loadLink(db: D1Database, linkId: string): Promise<LinkRow> {
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(linkId).first<LinkRow>();
+  if (!link) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  return link;
+}
+
+/** pid 决定确认的是哪一侧；两侧都要人类确认才生效。 */
+function sideFor(link: LinkRow, projectId: string): "source" | "target" {
+  if (link.from_project_id === projectId) return "source";
+  if (link.to_project_id === projectId) return "target";
+  throw new HttpError(404, "NOT_FOUND", "memory link not found");
+}
+
+/** 审批与撤销是 owner/admin 动作：普通成员不能替他所在的项目放行内容。 */
+function requireOwnerAdmin(c: Context<AppEnv>): void {
+  const role = c.get("projectRole");
+  if (role !== "owner" && role !== "admin") {
+    throw new HttpError(403, "FORBIDDEN", "project owner/admin required");
+  }
+}
 
 memoryRoutes.get("/projects/:pid/memory", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
   const space = await spaceFor(c.env.DB, project.id);
   if (!space) {
-    return c.json({ project_id: project.id, space: null, entry_count: 0, ref_count: 0, refs: [] });
+    return c.json({ project_id: project.id, space: null, entry_count: 0, link_count: 0, links: [] });
   }
   const counts = await c.env.DB
     .prepare(`SELECT
       (SELECT COUNT(*) FROM memory_entries WHERE space_id = ?1 AND status = 'active') AS entry_count,
-      (SELECT COUNT(*) FROM memory_refs WHERE space_id = ?1) AS ref_count`)
+      (SELECT COUNT(*) FROM memory_entry_links l JOIN memory_entries e ON e.id = l.entry_id
+        WHERE e.space_id = ?1 AND l.state = 'active') AS link_count`)
     .bind(space.id)
-    .first<{ entry_count: number; ref_count: number }>();
+    .first<{ entry_count: number; link_count: number }>();
   return c.json({
     project_id: project.id,
     space: { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at },
     entry_count: counts?.entry_count ?? 0,
-    ref_count: counts?.ref_count ?? 0,
-    refs: await listRefs(c.env.DB, space.id),
+    link_count: counts?.link_count ?? 0,
+    links: await listLinks(c.env.DB, project.id),
   });
 });
 
@@ -146,9 +177,13 @@ memoryRoutes.patch("/projects/:pid/memory/entries/:eid", requireUser, requirePro
   return c.json({ entry: result.entry, ...result.event });
 });
 
-memoryRoutes.post("/projects/:pid/memory/entries/:eid/grants", requireUser, requireProjectMember, async (c) => {
+/**
+ * 作者级闸门：允许/禁止该条目被申请跨项目链接。作者本人或项目 owner/admin。
+ * 关闭时同一批里撤销所有未结束的链接，立即生效。
+ */
+memoryRoutes.post("/projects/:pid/memory/entries/:eid/shareable", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
-  const body = await parseBody(c, grantInput);
+  const body = await parseBody(c, shareableInput);
   const actor = humanActor(c);
   const entry = await loadEntry(c.env.DB, c.req.param("eid"));
   if (entry.project_id !== project.id) throw new HttpError(404, "NOT_FOUND", "memory entry not found");
@@ -156,7 +191,7 @@ memoryRoutes.post("/projects/:pid/memory/entries/:eid/grants", requireUser, requ
   const role = c.get("projectRole");
   const isAuthor = entry.created_by_type === "user" && entry.created_by_id === actor.id;
   if (!isAuthor && role !== "owner" && role !== "admin") {
-    throw new HttpError(403, "FORBIDDEN", "only the entry author or a project owner/admin can grant cross-project access");
+    throw new HttpError(403, "FORBIDDEN", "only the entry author or a project owner/admin can change the sharing flag");
   }
 
   if (body.message_id) {
@@ -164,47 +199,108 @@ memoryRoutes.post("/projects/:pid/memory/entries/:eid/grants", requireUser, requ
     if (previous) return c.json({ ...previous }, 200);
   }
 
-  const result = await issueGrant(c, {
+  const result = await setShareable(c, {
     projectId: project.id,
     entryId: entry.id,
-    toProjectId: body.to_project_id,
+    shareable: body.shareable,
     actor,
-    ttlHours: body.ttl_hours ?? null,
     messageId: body.message_id ?? null,
   });
-  return c.json({ grant: result.grant, ...result.event }, 201);
+  return c.json({ entry: result.entry, revoked_links: result.revoked_links, ...result.event });
 });
 
-memoryRoutes.post("/projects/:pid/memory/grants/:gid/revoke", requireUser, requireProjectMember, async (c) => {
+memoryRoutes.get("/projects/:pid/memory/links", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
-  const body = await parseBody(c, revokeInput);
+  return c.json({ project_id: project.id, links: await listLinks(c.env.DB, project.id) });
+});
+
+/** 发起申请；pid 是**目标**项目（要引入这条记忆的项目）。 */
+memoryRoutes.post("/projects/:pid/memory/links", requireUser, requireProjectMember, async (c) => {
+  const project = c.get("project");
+  const body = await parseBody(c, linkInput);
   const actor = humanActor(c);
-
-  const grant = await c.env.DB
-    .prepare("SELECT * FROM memory_ref_grants WHERE id = ?1")
-    .bind(c.req.param("gid"))
-    .first<{ id: string; entry_id: string; granted_by_type: string; granted_by_id: string }>();
-  if (!grant) throw new HttpError(404, "NOT_FOUND", "memory grant not found");
-  const entry = await loadEntry(c.env.DB, grant.entry_id);
-  if (entry.project_id !== project.id) throw new HttpError(404, "NOT_FOUND", "memory grant not found");
-
-  const role = c.get("projectRole");
-  const isIssuer = grant.granted_by_type === "user" && grant.granted_by_id === actor.id;
-  if (!isIssuer && role !== "owner" && role !== "admin") {
-    throw new HttpError(403, "FORBIDDEN", "only the grant issuer or a project owner/admin can revoke");
-  }
 
   if (body.message_id) {
     const previous = await findExistingProjectEvent(c, project.id, body.message_id);
     if (previous) return c.json({ ...previous }, 200);
   }
 
-  const result = await revokeGrant(c, {
+  const result = await requestLink(c, {
+    toProjectId: project.id,
+    entryId: body.entry_id,
+    actor,
+    messageId: body.message_id ?? null,
+  });
+  return c.json({ link: result.link, ...result.event }, 201);
+});
+
+/** 确认链接：pid 决定是哪一侧（源项目 / 目标项目），两侧都确认才 active。 */
+memoryRoutes.post("/projects/:pid/memory/links/:lid/approve", requireUser, requireProjectMember, async (c) => {
+  const project = c.get("project");
+  requireOwnerAdmin(c);
+  const actor = humanActor(c);
+  const link = await loadLink(c.env.DB, c.req.param("lid"));
+  const side = sideFor(link, project.id);
+  const body = await parseBody(c, linkActionInput);
+
+  if (body.message_id) {
+    const previous = await findExistingProjectEvent(c, project.id, body.message_id);
+    if (previous) return c.json({ ...previous }, 200);
+  }
+
+  const result = await approveLink(c, {
     projectId: project.id,
-    grantId: grant.id,
+    linkId: link.id,
+    side,
+    actor,
+    messageId: body.message_id ?? null,
+  });
+  return c.json({ link: result.link, ...result.event });
+});
+
+memoryRoutes.post("/projects/:pid/memory/links/:lid/reject", requireUser, requireProjectMember, async (c) => {
+  const project = c.get("project");
+  requireOwnerAdmin(c);
+  const actor = humanActor(c);
+  const link = await loadLink(c.env.DB, c.req.param("lid"));
+  sideFor(link, project.id);
+  const body = await parseBody(c, linkActionInput);
+
+  if (body.message_id) {
+    const previous = await findExistingProjectEvent(c, project.id, body.message_id);
+    if (previous) return c.json({ ...previous }, 200);
+  }
+
+  const result = await rejectLink(c, {
+    projectId: project.id,
+    linkId: link.id,
     actor,
     reason: body.reason ?? null,
     messageId: body.message_id ?? null,
   });
-  return c.json(result);
+  return c.json({ link: result.link, ...result.event });
+});
+
+/** 撤销只能由源项目执行：内容属于源项目。 */
+memoryRoutes.post("/projects/:pid/memory/links/:lid/revoke", requireUser, requireProjectMember, async (c) => {
+  const project = c.get("project");
+  requireOwnerAdmin(c);
+  const actor = humanActor(c);
+  const link = await loadLink(c.env.DB, c.req.param("lid"));
+  if (link.from_project_id !== project.id) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  const body = await parseBody(c, linkActionInput);
+
+  if (body.message_id) {
+    const previous = await findExistingProjectEvent(c, project.id, body.message_id);
+    if (previous) return c.json({ ...previous }, 200);
+  }
+
+  const result = await revokeLink(c, {
+    projectId: project.id,
+    linkId: link.id,
+    actor,
+    reason: body.reason ?? null,
+    messageId: body.message_id ?? null,
+  });
+  return c.json({ link: result.link, ...result.event });
 });

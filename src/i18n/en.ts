@@ -98,9 +98,10 @@ export const en = {
   "error.SELF_DEAL_COOLDOWN": "Wait for this card’s cooldown before self-dealing.",
 
   "error.SECRET_DETECTED": "The content looks like it contains a credential and was rejected.",
-  "error.GRANT_REVOKED": "This memory grant has been revoked.",
-  "error.GRANT_EXPIRED": "This memory grant has expired.",
-  "error.CONTENT_HASH_MISMATCH": "The referenced content does not match the hash recorded in the grant.",
-  "error.SOURCE_UNAVAILABLE": "The source memory entry is no longer available at the granted version.",
+  "error.NOT_SHAREABLE": "This memory entry is not open for cross-project linking yet.",
+  "error.LINK_STATE_INVALID": "The link state changed; reload and retry.",
+  "error.LINK_REVOKED": "This cross-project link has been revoked.",
+  "error.LINK_INACTIVE": "This cross-project link is not active.",
+  "error.SOURCE_UNAVAILABLE": "The source memory entry is no longer available.",
 
 } as const;

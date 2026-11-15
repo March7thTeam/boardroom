@@ -1,13 +1,18 @@
--- 0004_memory_spaces.sql —— 项目记忆空间（P1：1 项目 : 1 空间 + 引用凭据）
+-- 0004_memory_spaces.sql —— 项目记忆空间（P1：1 项目 : 1 空间 + 双方确认的跨项目链接）
 --
--- 设计取舍（见 GitHub March7thTeam/boardroom#11 的决策评论）：
---   * 记忆不再跨项目共享数据库视图。每项目一份本地记忆，跨项目只能通过
---     A 侧签发的引用凭据（memory_ref_grants）授权，B 侧显式登记（memory_refs）。
---   * 引用绑定 (entry_id, entry_version, content_sha256)，源条目更新不会自动
---     更新下游引用；凭据撤销只停止后续读取，不能收回下游已取得的副本。
---   * space 与 project 是 1:1；项目删除时空间与其条目级联删除。
---   * 记忆事件是项目级事件（event_outbox.card_id = NULL），因此需要一条
---     针对 NULL 卡片的部分唯一索引，否则 message_id 幂等对记忆事件不生效。
+-- 设计取舍（GitHub March7thTeam/boardroom#11 的决策线）：
+--   * 记忆默认留在项目内。每条记忆有一个作者可控的 `shareable` 开关（默认 0），
+--     它只表示「允许被申请链接」，不等于已经对外可见。
+--   * 跨项目不是共享视图，也不是持票读取：链接必须由**源项目与目标项目的人类
+--     各确认一次**（pending_source → pending_target → active），对齐
+--     「Agent 不因项目内写权限自动获得对外可见」。Agent 只能发起申请。
+--   * 可见范围额外受成员关系约束：只有同时在这两个项目里 active 的 agent 才会
+--     看到链接。指针是查询结果而非表，因此不存在「过期指针」。
+--   * 不绑定版本/哈希：读者本身就是源项目的 active 成员、有独立读取权，链接
+--     解析到当前版本不越权；版本快照只属于「发布到外部存储」的场景，本 P1 不做。
+--   * space 与 project 是 1:1；项目删除时空间、条目与链接级联删除。
+--   * 记忆事件是项目级事件（event_outbox.card_id = NULL），因此需要一条针对
+--     NULL 卡片的部分唯一索引，否则 message_id 幂等对记忆事件不生效。
 
 PRAGMA foreign_keys = ON;
 
@@ -29,6 +34,8 @@ CREATE TABLE memory_entries (
   tags_json       TEXT NOT NULL DEFAULT '[]',
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
   version         INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  -- 作者级闸门：允许被申请跨项目链接。默认关闭 = 记忆默认留在项目内。
+  shareable       INTEGER NOT NULL DEFAULT 0 CHECK (shareable IN (0,1)),
   source_card_id  TEXT REFERENCES cards(id) ON DELETE SET NULL,
   created_by_type TEXT NOT NULL CHECK (created_by_type IN ('agent','user','system')),
   created_by_id   TEXT NOT NULL,
@@ -53,39 +60,34 @@ CREATE TABLE memory_revisions (
   UNIQUE (entry_id, version)
 );
 
-CREATE TABLE memory_ref_grants (
-  id              TEXT PRIMARY KEY,
-  entry_id        TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
-  entry_version   INTEGER NOT NULL,
-  content_sha256  TEXT NOT NULL,
-  to_project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  granted_by_type TEXT NOT NULL CHECK (granted_by_type IN ('agent','user','system')),
-  granted_by_id   TEXT NOT NULL,
-  granted_at      TEXT NOT NULL,
-  expires_at      TEXT,
-  revoked_at      TEXT,
-  revoked_reason  TEXT
+-- 跨项目链接：源项目与目标项目的人类各确认一次才 active。申请方可以是 agent。
+CREATE TABLE memory_entry_links (
+  id                 TEXT PRIMARY KEY,
+  entry_id           TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
+  from_project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  to_project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  state              TEXT NOT NULL DEFAULT 'pending_source'
+                       CHECK (state IN ('pending_source','pending_target','active','rejected','revoked')),
+  requested_by_type  TEXT NOT NULL CHECK (requested_by_type IN ('agent','user','system')),
+  requested_by_id    TEXT NOT NULL,
+  requested_at       TEXT NOT NULL,
+  source_approved_by TEXT,
+  source_approved_at TEXT,
+  target_approved_by TEXT,
+  target_approved_at TEXT,
+  rejected_by        TEXT,
+  rejected_at        TEXT,
+  rejected_reason    TEXT,
+  revoked_by         TEXT,
+  revoked_at         TEXT,
+  CHECK (from_project_id <> to_project_id)
 );
--- 同一 (条目, 版本, 目标项目) 同时只能有一条有效凭据；撤销后可重新签发。
-CREATE UNIQUE INDEX uq_memory_grant_live
-  ON memory_ref_grants(entry_id, entry_version, to_project_id) WHERE revoked_at IS NULL;
-CREATE INDEX idx_memory_grant_target ON memory_ref_grants(to_project_id, revoked_at);
-
-CREATE TABLE memory_refs (
-  id               TEXT PRIMARY KEY,
-  project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  space_id         TEXT NOT NULL REFERENCES memory_spaces(id) ON DELETE CASCADE,
-  grant_id         TEXT NOT NULL UNIQUE REFERENCES memory_ref_grants(id) ON DELETE CASCADE,
-  source_entry_id  TEXT NOT NULL,
-  source_version   INTEGER NOT NULL,
-  content_sha256   TEXT NOT NULL,
-  title            TEXT NOT NULL,
-  imported_by_type TEXT NOT NULL CHECK (imported_by_type IN ('agent','user','system')),
-  imported_by_id   TEXT NOT NULL,
-  imported_at      TEXT NOT NULL,
-  revoked_at       TEXT
-);
-CREATE INDEX idx_memory_refs_space ON memory_refs(space_id, imported_at);
+-- 同一对 (条目, 目标项目) 同时只能有一条未结束的链接。
+CREATE UNIQUE INDEX uq_memory_link_open
+  ON memory_entry_links(entry_id, to_project_id)
+  WHERE state IN ('pending_source','pending_target','active');
+CREATE INDEX idx_memory_link_target ON memory_entry_links(to_project_id, state);
+CREATE INDEX idx_memory_link_source ON memory_entry_links(from_project_id, state);
 
 -- 记忆事件走项目级 outbox 行（card_id IS NULL）。SQLite 的 NULL 互不相等，
 -- 现有 uq_outbox_message(card_id, message_id) 对这类行没有约束力。
@@ -106,4 +108,12 @@ BEFORE UPDATE OF space_id, project_id ON memory_entries
 FOR EACH ROW WHEN (SELECT project_id FROM memory_spaces WHERE id = NEW.space_id) <> NEW.project_id
 BEGIN
   SELECT RAISE(ABORT, 'memory_entries.project_id must match its space project');
+END;
+
+-- 链接的来源项目必须与条目所属项目一致，避免伪造来源。
+CREATE TRIGGER trg_memory_link_source_guard_insert
+BEFORE INSERT ON memory_entry_links
+FOR EACH ROW WHEN (SELECT project_id FROM memory_entries WHERE id = NEW.entry_id) <> NEW.from_project_id
+BEGIN
+  SELECT RAISE(ABORT, 'memory_entry_links.from_project_id must match the entry project');
 END;

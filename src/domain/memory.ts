@@ -48,6 +48,7 @@ export interface EntryRow {
   tags_json: string;
   status: "active" | "deleted";
   version: number;
+  shareable: number;
   source_card_id: string | null;
   created_by_type: "agent" | "user" | "system";
   created_by_id: string;
@@ -68,32 +69,23 @@ export interface RevisionRow {
   created_at: string;
 }
 
-export interface GrantRow {
+export interface LinkRow {
   id: string;
   entry_id: string;
-  entry_version: number;
-  content_sha256: string;
+  from_project_id: string;
   to_project_id: string;
-  granted_by_type: "agent" | "user" | "system";
-  granted_by_id: string;
-  granted_at: string;
-  expires_at: string | null;
-  revoked_at: string | null;
-  revoked_reason: string | null;
-}
-
-export interface RefRow {
-  id: string;
-  project_id: string;
-  space_id: string;
-  grant_id: string;
-  source_entry_id: string;
-  source_version: number;
-  content_sha256: string;
-  title: string;
-  imported_by_type: "agent" | "user" | "system";
-  imported_by_id: string;
-  imported_at: string;
+  state: "pending_source" | "pending_target" | "active" | "rejected" | "revoked";
+  requested_by_type: "agent" | "user" | "system";
+  requested_by_id: string;
+  requested_at: string;
+  source_approved_by: string | null;
+  source_approved_at: string | null;
+  target_approved_by: string | null;
+  target_approved_at: string | null;
+  rejected_by: string | null;
+  rejected_at: string | null;
+  rejected_reason: string | null;
+  revoked_by: string | null;
   revoked_at: string | null;
 }
 
@@ -120,6 +112,7 @@ export function publicEntry(row: EntryRow) {
     tags,
     status: row.status,
     version: row.version,
+    shareable: row.shareable === 1,
     source_card_id: row.source_card_id,
     created_by: { type: row.created_by_type, id: row.created_by_id },
     created_at: row.created_at,
@@ -453,171 +446,55 @@ export async function deleteEntry(
 }
 
 /**
- * 签发引用凭据。人类动作：条目作者本人，或项目 owner/admin。
- * 凭据绑定当前 entry_version 与内容哈希；内容再变也不会影响这张凭据。
+ * 作者级闸门：允许该条目被申请跨项目链接。人类动作（作者本人，或 owner/admin 代开）；
+ * agent 只能申请，不能自行打开。关闭时同时撤销所有未结束的链接，立即生效。
  */
-export async function issueGrant(
+export async function setShareable(
   c: Context<AppEnv>,
-  input: {
-    projectId: string;
-    entryId: string;
-    toProjectId: string;
-    actor: Actor;
-    ttlHours?: number | null;
-    messageId?: string | null;
-  },
-): Promise<{ grant: GrantRow; event: Record<string, unknown> }> {
+  input: { projectId: string; entryId: string; shareable: boolean; actor: Actor; messageId?: string | null },
+): Promise<{ entry: ReturnType<typeof publicEntry>; revoked_links: number; event: Record<string, unknown> }> {
   const db = c.env.DB;
   const entry = await loadEntry(db, input.entryId);
   if (entry.project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory entry not found");
   if (entry.status !== "active") throw new HttpError(409, "CARD_STATE_INVALID", "memory entry is deleted");
-  if (input.toProjectId === entry.project_id) {
-    throw new HttpError(400, "INVALID_ARGUMENT", "grant target must be another project");
+  if (input.actor.type === "agent" && entry.created_by_id !== input.actor.id) {
+    throw new HttpError(403, "FORBIDDEN", "agents may only change the sharing flag of their own entries");
   }
 
-  const target = await db
-    .prepare("SELECT id FROM projects WHERE id = ?1 AND archived_at IS NULL")
-    .bind(input.toProjectId)
-    .first<{ id: string }>();
-  if (!target) throw new HttpError(404, "NOT_FOUND", "target project not found");
-
-  const revision = await db
-    .prepare("SELECT * FROM memory_revisions WHERE entry_id = ?1 AND version = ?2")
-    .bind(entry.id, entry.version)
-    .first<RevisionRow>();
-  if (!revision) throw new HttpError(409, "CARD_STATE_INVALID", "memory entry has no revision for its current version");
-
+  const next = input.shareable ? 1 : 0;
   const now = nowIso();
-  const expiresAt = input.ttlHours ? new Date(Date.now() + input.ttlHours * 3_600_000).toISOString() : null;
-  const grantId = newId("mg");
-  const insert = db
-    .prepare(`INSERT INTO memory_ref_grants
-      (id, entry_id, entry_version, content_sha256, to_project_id, granted_by_type, granted_by_id, granted_at, expires_at)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`)
-    .bind(grantId, entry.id, entry.version, revision.body_hash, input.toProjectId, input.actor.type, input.actor.id, now, expiresAt);
-
-  const result = await commitAndPublish(c, insert, {
-    projectId: entry.project_id,
-    cardId: null,
-    eventType: "memory.ref_granted",
-    actorType: input.actor.type,
-    actorId: input.actor.id,
-    payload: {
-      grant_id: grantId,
-      entry_id: entry.id,
-      entry_version: entry.version,
-      content_sha256: revision.body_hash,
-      to_project_id: input.toProjectId,
-      expires_at: expiresAt,
-    },
-    messageId: input.messageId ?? null,
-    receipt: { grant_id: grantId, entry_id: entry.id, entry_version: entry.version },
-  });
-  if (!result) throw new HttpError(409, "CONFLICT", "grant was not created");
-
-  const grant = await db.prepare("SELECT * FROM memory_ref_grants WHERE id = ?1").bind(grantId).first<GrantRow>();
-  if (!grant) throw new HttpError(500, "INTERNAL", "grant missing after write");
-  return {
-    grant,
-    event: {
-      seq: result.seq,
-      event_id: result.event_id,
-      event_pending: result.event_pending,
-      ...(result.duplicate ? { duplicate: true } : {}),
-    },
-  };
-}
-
-export async function revokeGrant(
-  c: Context<AppEnv>,
-  input: { projectId: string; grantId: string; actor: Actor; reason?: string | null; messageId?: string | null },
-): Promise<{ grant_id: string; event: Record<string, unknown> }> {
-  const db = c.env.DB;
-  const grant = await db.prepare("SELECT * FROM memory_ref_grants WHERE id = ?1").bind(input.grantId).first<GrantRow>();
-  if (!grant) throw new HttpError(404, "NOT_FOUND", "memory grant not found");
-  const entry = await loadEntry(db, grant.entry_id);
-  if (entry.project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory grant not found");
-  if (grant.revoked_at) throw new HttpError(409, "CARD_STATE_INVALID", "memory grant is already revoked");
-
-  const now = nowIso();
-  const update = db
-    .prepare("UPDATE memory_ref_grants SET revoked_at = ?1, revoked_reason = ?2 WHERE id = ?3 AND revoked_at IS NULL")
-    .bind(now, input.reason ?? null, input.grantId);
-
-  const result = await commitAndPublish(c, update, {
-    projectId: entry.project_id,
-    cardId: null,
-    eventType: "memory.grant_revoked",
-    actorType: input.actor.type,
-    actorId: input.actor.id,
-    payload: { grant_id: input.grantId, entry_id: entry.id, entry_version: grant.entry_version },
-    messageId: input.messageId ?? null,
-    receipt: { grant_id: input.grantId, revoked_at: now },
-  });
-  if (!result) throw new HttpError(409, "CONFLICT", "grant could not be revoked");
-  return {
-    grant_id: input.grantId,
-    event: {
-      seq: result.seq,
-      event_id: result.event_id,
-      event_pending: result.event_pending,
-      ...(result.duplicate ? { duplicate: true } : {}),
-    },
-  };
-}
-
-/** B 侧登记引用。凭据必须指向本项目、未撤销、未过期。 */
-export async function importRef(
-  c: Context<AppEnv>,
-  input: { projectId: string; actor: Actor; grantId: string; messageId?: string | null },
-): Promise<{ ref: RefRow; event: Record<string, unknown> }> {
-  const db = c.env.DB;
-  const grant = await db.prepare("SELECT * FROM memory_ref_grants WHERE id = ?1").bind(input.grantId).first<GrantRow>();
-  if (!grant || grant.to_project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory grant not found");
-  if (grant.revoked_at) throw new HttpError(410, "GRANT_REVOKED", "memory grant has been revoked");
-  if (grant.expires_at && Date.parse(grant.expires_at) <= Date.now()) {
-    throw new HttpError(410, "GRANT_EXPIRED", "memory grant has expired");
+  const statements = [
+    db.prepare("UPDATE memory_entries SET shareable = ?1, updated_at = ?2 WHERE id = ?3 AND shareable <> ?1")
+      .bind(next, now, entry.id),
+  ];
+  if (next === 0) {
+    statements.push(db
+      .prepare(`UPDATE memory_entry_links
+        SET state = 'revoked', revoked_by = ?1, revoked_at = ?2
+        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')`)
+      .bind(input.actor.id, now, entry.id));
   }
 
-  const entry = await db.prepare("SELECT * FROM memory_entries WHERE id = ?1").bind(grant.entry_id).first<EntryRow>();
-  if (!entry || entry.status !== "active") throw new HttpError(404, "SOURCE_UNAVAILABLE", "source memory entry is not available");
-
-  const space = await ensureSpace(db, input.projectId);
-  const now = nowIso();
-  const refId = newId("mref");
-  const insert = db
-    .prepare(`INSERT INTO memory_refs
-      (id, project_id, space_id, grant_id, source_entry_id, source_version, content_sha256, title, imported_by_type, imported_by_id, imported_at)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)`)
-    .bind(refId, input.projectId, space.id, grant.id, grant.entry_id, grant.entry_version, grant.content_sha256, entry.title, input.actor.type, input.actor.id, now);
-
-  const result = await commitAndPublish(c, insert, {
-    projectId: input.projectId,
+  const result = await commitAndPublish(c, statements, {
+    projectId: entry.project_id,
     cardId: null,
-    eventType: "memory.ref_imported",
+    eventType: "memory.entry_share_toggled",
     actorType: input.actor.type,
     actorId: input.actor.id,
-    payload: {
-      ref_id: refId,
-      grant_id: grant.id,
-      source_entry_id: grant.entry_id,
-      source_version: grant.entry_version,
-      content_sha256: grant.content_sha256,
-    },
+    payload: { entry_id: entry.id, space_id: entry.space_id, shareable: next === 1 },
     messageId: input.messageId ?? null,
-    receipt: { ref_id: refId, grant_id: grant.id },
-  }).catch((error: unknown) => {
-    if (error instanceof Error && /UNIQUE constraint failed: memory_refs\./i.test(error.message)) {
-      throw new HttpError(409, "CONFLICT", "this grant is already imported");
-    }
-    throw error;
+    receipt: { entry_id: entry.id, shareable: next === 1 },
   });
-  if (!result) throw new HttpError(409, "CONFLICT", "reference was not created");
+  if (!result) throw new HttpError(409, "CONFLICT", "sharing flag was not updated");
 
-  const ref = await db.prepare("SELECT * FROM memory_refs WHERE id = ?1").bind(refId).first<RefRow>();
-  if (!ref) throw new HttpError(500, "INTERNAL", "reference missing after write");
+  const revoked = await db
+    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked'")
+    .bind(entry.id)
+    .first<{ c: number }>();
+  const updated = await loadEntry(db, entry.id);
   return {
-    ref,
+    entry: publicEntry(updated),
+    revoked_links: revoked?.c ?? 0,
     event: {
       seq: result.seq,
       event_id: result.event_id,
@@ -628,58 +505,290 @@ export async function importRef(
 }
 
 /**
- * 读取引用。任何一项不满足都明确报错，绝不静默替换成源条目的最新版本。
+ * 发起链接申请。agent 与人类都只能「申请」：真正生效需要源项目与目标项目的人类
+ * 各确认一次。申请写入目标项目的事件链（申请人是目标项目的成员）。
  */
-export async function readRef(
-  db: D1Database,
-  projectId: string,
-  refId: string,
-): Promise<{ ref: RefRow; grant: GrantRow; entry: { id: string; version: number; title: string; body: string; content_sha256: string } }> {
-  const ref = await db
-    .prepare("SELECT * FROM memory_refs WHERE id = ?1 AND project_id = ?2")
-    .bind(refId, projectId)
-    .first<RefRow>();
-  if (!ref) throw new HttpError(404, "NOT_FOUND", "memory reference not found");
-  if (ref.revoked_at) throw new HttpError(410, "GRANT_REVOKED", "memory reference has been revoked");
-
-  const grant = await db.prepare("SELECT * FROM memory_ref_grants WHERE id = ?1").bind(ref.grant_id).first<GrantRow>();
-  if (!grant) throw new HttpError(404, "SOURCE_UNAVAILABLE", "memory grant no longer exists");
-  if (grant.revoked_at) throw new HttpError(410, "GRANT_REVOKED", "memory grant has been revoked");
-  if (grant.expires_at && Date.parse(grant.expires_at) <= Date.now()) {
-    throw new HttpError(410, "GRANT_EXPIRED", "memory grant has expired");
+export async function requestLink(
+  c: Context<AppEnv>,
+  input: { toProjectId: string; entryId: string; actor: Actor; messageId?: string | null },
+): Promise<{ link: LinkRow; event: Record<string, unknown> }> {
+  const db = c.env.DB;
+  const entry = await loadEntry(db, input.entryId);
+  if (entry.status !== "active") throw new HttpError(409, "CARD_STATE_INVALID", "memory entry is deleted");
+  if (entry.project_id === input.toProjectId) {
+    throw new HttpError(400, "INVALID_ARGUMENT", "link target must be another project");
   }
-  if (grant.content_sha256 !== ref.content_sha256) {
-    throw new HttpError(409, "CONTENT_HASH_MISMATCH", "reference and grant disagree on the content hash");
+  if (entry.shareable !== 1) {
+    throw new HttpError(403, "NOT_SHAREABLE", "the entry author has not allowed cross-project linking");
   }
 
-  const revision = await db
-    .prepare("SELECT * FROM memory_revisions WHERE entry_id = ?1 AND version = ?2")
-    .bind(grant.entry_id, grant.entry_version)
-    .first<RevisionRow>();
-  if (!revision) throw new HttpError(404, "SOURCE_UNAVAILABLE", "source revision is no longer available");
+  const target = await db
+    .prepare("SELECT id FROM projects WHERE id = ?1 AND archived_at IS NULL")
+    .bind(input.toProjectId)
+    .first<{ id: string }>();
+  if (!target) throw new HttpError(404, "NOT_FOUND", "target project not found");
 
-  const hash = await revisionHash(revision.title, revision.body);
-  if (hash !== grant.content_sha256) {
-    throw new HttpError(409, "CONTENT_HASH_MISMATCH", "source revision does not match the granted hash");
-  }
+  const now = nowIso();
+  const linkId = newId("ml");
+  const insert = db
+    .prepare(`INSERT INTO memory_entry_links
+      (id, entry_id, from_project_id, to_project_id, state, requested_by_type, requested_by_id, requested_at)
+      VALUES (?1,?2,?3,?4,'pending_source',?5,?6,?7)`)
+    .bind(linkId, entry.id, entry.project_id, input.toProjectId, input.actor.type, input.actor.id, now);
 
+  const result = await commitAndPublish(c, insert, {
+    projectId: input.toProjectId,
+    cardId: null,
+    eventType: "memory.link_requested",
+    actorType: input.actor.type,
+    actorId: input.actor.id,
+    payload: { link_id: linkId, entry_id: entry.id, from_project_id: entry.project_id, to_project_id: input.toProjectId },
+    messageId: input.messageId ?? null,
+    receipt: { link_id: linkId, entry_id: entry.id, state: "pending_source" },
+  }).catch((error: unknown) => {
+    if (error instanceof Error && /UNIQUE constraint failed: memory_entry_links\./i.test(error.message)) {
+      throw new HttpError(409, "CONFLICT", "an open link for this entry and project already exists");
+    }
+    throw error;
+  });
+  if (!result) throw new HttpError(409, "CONFLICT", "link request was not recorded");
+
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(linkId).first<LinkRow>();
+  if (!link) throw new HttpError(500, "INTERNAL", "link missing after write");
   return {
-    ref,
-    grant,
-    entry: {
-      id: revision.entry_id,
-      version: revision.version,
-      title: revision.title,
-      body: revision.body,
-      content_sha256: hash,
+    link,
+    event: {
+      seq: result.seq,
+      event_id: result.event_id,
+      event_pending: result.event_pending,
+      ...(result.duplicate ? { duplicate: true } : {}),
     },
   };
 }
 
-export async function listRefs(db: D1Database, spaceId: string): Promise<RefRow[]> {
+function linkStateConflict(link: LinkRow, expected: string): never {
+  throw new HttpError(409, "LINK_STATE_INVALID", `link is in state ${link.state}, expected ${expected}`);
+}
+
+/**
+ * 人类确认。side 由批准人所在项目决定：源项目确认后才进入目标项目确认，
+ * 两边都确认才 active。
+ */
+export async function approveLink(
+  c: Context<AppEnv>,
+  input: {
+    projectId: string;
+    linkId: string;
+    side: "source" | "target";
+    actor: Actor;
+    messageId?: string | null;
+  },
+): Promise<{ link: LinkRow; event: Record<string, unknown> }> {
+  const db = c.env.DB;
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(input.linkId).first<LinkRow>();
+  if (!link) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+
+  const expectedProject = input.side === "source" ? link.from_project_id : link.to_project_id;
+  if (expectedProject !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+
+  const now = nowIso();
+  let nextState: LinkRow["state"];
+  let statement: D1PreparedStatement;
+  if (input.side === "source") {
+    if (link.state !== "pending_source") linkStateConflict(link, "pending_source");
+    nextState = "pending_target";
+    statement = db
+      .prepare(`UPDATE memory_entry_links SET state = ?1, source_approved_by = ?2, source_approved_at = ?3
+        WHERE id = ?4 AND state = 'pending_source'`)
+      .bind(nextState, input.actor.id, now, link.id);
+  } else {
+    if (link.state !== "pending_target") linkStateConflict(link, "pending_target");
+    nextState = "active";
+    statement = db
+      .prepare(`UPDATE memory_entry_links SET state = ?1, target_approved_by = ?2, target_approved_at = ?3
+        WHERE id = ?4 AND state = 'pending_target'`)
+      .bind(nextState, input.actor.id, now, link.id);
+  }
+
+  const result = await commitAndPublish(c, statement, {
+    projectId: input.projectId,
+    cardId: null,
+    eventType: input.side === "source" ? "memory.link_source_approved" : "memory.link_activated",
+    actorType: input.actor.type,
+    actorId: input.actor.id,
+    payload: { link_id: link.id, entry_id: link.entry_id, state: nextState, side: input.side },
+    messageId: input.messageId ?? null,
+    receipt: { link_id: link.id, state: nextState },
+  });
+  if (!result) throw new HttpError(409, "LINK_STATE_INVALID", "link changed while approving");
+
+  const updated = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(link.id).first<LinkRow>();
+  if (!updated) throw new HttpError(500, "INTERNAL", "link missing after approval");
+  return {
+    link: updated,
+    event: {
+      seq: result.seq,
+      event_id: result.event_id,
+      event_pending: result.event_pending,
+      ...(result.duplicate ? { duplicate: true } : {}),
+    },
+  };
+}
+
+export async function rejectLink(
+  c: Context<AppEnv>,
+  input: { projectId: string; linkId: string; actor: Actor; reason?: string | null; messageId?: string | null },
+): Promise<{ link: LinkRow; event: Record<string, unknown> }> {
+  const db = c.env.DB;
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(input.linkId).first<LinkRow>();
+  if (!link) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  if (link.from_project_id !== input.projectId && link.to_project_id !== input.projectId) {
+    throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  }
+  if (link.state !== "pending_source" && link.state !== "pending_target") {
+    linkStateConflict(link, "pending_source|pending_target");
+  }
+
+  const now = nowIso();
+  const statement = db
+    .prepare(`UPDATE memory_entry_links SET state = 'rejected', rejected_by = ?1, rejected_at = ?2, rejected_reason = ?3
+      WHERE id = ?4 AND state IN ('pending_source','pending_target')`)
+    .bind(input.actor.id, now, input.reason ?? null, link.id);
+
+  const result = await commitAndPublish(c, statement, {
+    projectId: input.projectId,
+    cardId: null,
+    eventType: "memory.link_rejected",
+    actorType: input.actor.type,
+    actorId: input.actor.id,
+    payload: { link_id: link.id, entry_id: link.entry_id },
+    messageId: input.messageId ?? null,
+    receipt: { link_id: link.id, state: "rejected" },
+  });
+  if (!result) throw new HttpError(409, "LINK_STATE_INVALID", "link changed while rejecting");
+
+  const updated = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(link.id).first<LinkRow>();
+  if (!updated) throw new HttpError(500, "INTERNAL", "link missing after rejection");
+  return {
+    link: updated,
+    event: {
+      seq: result.seq,
+      event_id: result.event_id,
+      event_pending: result.event_pending,
+      ...(result.duplicate ? { duplicate: true } : {}),
+    },
+  };
+}
+
+export async function revokeLink(
+  c: Context<AppEnv>,
+  input: { projectId: string; linkId: string; actor: Actor; reason?: string | null; messageId?: string | null },
+): Promise<{ link: LinkRow; event: Record<string, unknown> }> {
+  const db = c.env.DB;
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(input.linkId).first<LinkRow>();
+  if (!link || link.from_project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  if (link.state !== "active" && link.state !== "pending_target") {
+    throw new HttpError(409, "LINK_STATE_INVALID", `link is in state ${link.state}`);
+  }
+
+  const now = nowIso();
+  const statement = db
+    .prepare("UPDATE memory_entry_links SET state = 'revoked', revoked_by = ?1, revoked_at = ?2 WHERE id = ?3 AND state IN ('active','pending_target')")
+    .bind(input.actor.id, now, link.id);
+
+  const result = await commitAndPublish(c, statement, {
+    projectId: input.projectId,
+    cardId: null,
+    eventType: "memory.link_revoked",
+    actorType: input.actor.type,
+    actorId: input.actor.id,
+    payload: { link_id: link.id, entry_id: link.entry_id, reason: input.reason ?? null },
+    messageId: input.messageId ?? null,
+    receipt: { link_id: link.id, state: "revoked" },
+  });
+  if (!result) throw new HttpError(409, "LINK_STATE_INVALID", "link changed while revoking");
+
+  const updated = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(link.id).first<LinkRow>();
+  if (!updated) throw new HttpError(500, "INTERNAL", "link missing after revoke");
+  return {
+    link: updated,
+    event: {
+      seq: result.seq,
+      event_id: result.event_id,
+      event_pending: result.event_pending,
+      ...(result.duplicate ? { duplicate: true } : {}),
+    },
+  };
+}
+
+/** 项目视角的链接列表（源方向 + 目标方向），供人类审批面板使用。 */
+export async function listLinks(db: D1Database, projectId: string): Promise<LinkRow[]> {
   const rows = await db
-    .prepare("SELECT * FROM memory_refs WHERE space_id = ?1 ORDER BY imported_at DESC LIMIT 200")
-    .bind(spaceId)
-    .all<RefRow>();
+    .prepare(`SELECT * FROM memory_entry_links
+      WHERE from_project_id = ?1 OR to_project_id = ?1
+      ORDER BY requested_at DESC LIMIT 200`)
+    .bind(projectId)
+    .all<LinkRow>();
   return rows.results;
+}
+
+/**
+ * 指针不是表，而是查询结果：只有**同时**在源项目与目标项目 active 的 agent 才能
+ * 看到这条链接。成员关系一断，指针自然消失，不存在过期指针。
+ */
+export async function listPointers(
+  db: D1Database,
+  agentId: string,
+  targetProjectId: string,
+): Promise<Array<{ link: LinkRow; entry: { id: string; title: string; version: number } }>> {
+  const rows = await db
+    .prepare(`SELECT l.id AS link_id, e.id AS entry_id, e.title, e.version
+      FROM memory_entry_links l
+      JOIN memory_entries e ON e.id = l.entry_id
+      JOIN agent_projects ap
+        ON ap.agent_id = ?1 AND ap.project_id = l.from_project_id AND ap.status = 'active'
+      WHERE l.to_project_id = ?2 AND l.state = 'active' AND e.status = 'active'
+      ORDER BY l.target_approved_at DESC
+      LIMIT 200`)
+    .bind(agentId, targetProjectId)
+    .all<{ link_id: string; entry_id: string; title: string; version: number }>();
+
+  // 本项目 SQL 一律用编号占位符（?N）：测试垫片只重写 ?N，裸 ? 会丢绑定。
+  const ids = rows.results.map((row) => row.link_id);
+  const links = ids.length
+    ? await db
+      .prepare(`SELECT * FROM memory_entry_links WHERE id IN (${ids.map((_, index) => `?${index + 1}`).join(",")})`)
+      .bind(...ids)
+      .all<LinkRow>()
+    : { results: [] as LinkRow[] };
+  const byId = new Map(links.results.map((link) => [link.id, link]));
+  return rows.results
+    .filter((row) => byId.has(row.link_id))
+    .map((row) => ({
+      link: byId.get(row.link_id)!,
+      entry: { id: row.entry_id, title: row.title, version: row.version },
+    }));
+}
+
+/** 通过链接读取内容：平台校验「链接 active + agent 在源项目与目标项目都 active」。 */
+export async function readPointer(
+  db: D1Database,
+  agentId: string,
+  targetProjectId: string,
+  linkId: string,
+): Promise<{ link: LinkRow; entry: ReturnType<typeof publicEntry> }> {
+  const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(linkId).first<LinkRow>();
+  if (!link || link.to_project_id !== targetProjectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  if (link.state !== "active") {
+    throw new HttpError(410, link.state === "revoked" ? "LINK_REVOKED" : "LINK_INACTIVE", `memory link is ${link.state}`);
+  }
+  const member = await db
+    .prepare("SELECT 1 AS ok FROM agent_projects WHERE agent_id = ?1 AND project_id = ?2 AND status = 'active'")
+    .bind(agentId, link.from_project_id)
+    .first<{ ok: number }>();
+  if (!member) throw new HttpError(403, "FORBIDDEN", "the agent is not active in the source project");
+
+  const entry = await loadEntry(db, link.entry_id);
+  if (entry.status !== "active") throw new HttpError(404, "SOURCE_UNAVAILABLE", "source memory entry is not available");
+  return { link, entry: publicEntry(entry) };
 }

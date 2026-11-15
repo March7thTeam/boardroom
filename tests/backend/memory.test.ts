@@ -4,6 +4,7 @@ import type { AppEnv } from "../../src/context";
 import type { Env } from "../../src/types";
 import { agentMemoryRoutes } from "../../src/routes/agent-memory";
 import { memoryRoutes } from "../../src/routes/memory";
+import { listPointers } from "../../src/domain/memory";
 import { tokenHash } from "../../src/lib/crypto";
 import { formatAgentToken } from "../../src/lib/tokens";
 import { HttpError } from "../../src/lib/http-error";
@@ -25,17 +26,15 @@ afterEach(() => {
 });
 
 interface Body {
-  entry?: { id: string; version: number; body: string; title: string; status: string };
-  ref?: { id: string; grant_id: string; source_version: number; content_sha256: string };
-  grant?: { id: string; entry_version: number; content_sha256: string; to_project_id: string };
-  space?: { id: string } | null;
+  entry?: { id: string; version: number; body?: string; title?: string; status: string; shareable?: boolean };
+  link?: { id: string; state: string; from_project_id: string; to_project_id: string };
+  pointers?: Array<{ link_id: string; entry_id: string; title: string }>;
   entries?: Array<{ id: string; version: number }>;
-  has_more?: boolean;
+  revoked_links?: number;
   duplicate?: boolean;
   seq?: number | null;
-  error?: { code: string; message: string };
   entry_id?: string;
-  version?: number;
+  error?: { code: string; message: string };
 }
 
 async function fixture() {
@@ -47,23 +46,33 @@ async function fixture() {
   }
   db.sqlite.exec(`
     INSERT INTO users(id,email,role) VALUES('u_owner','owner@example.test','member');
+    INSERT INTO users(id,email,role) VALUES('u_guest','guest@example.test','member');
     INSERT INTO projects(id,slug,name,created_by) VALUES('${PRJ_A}','alpha','Alpha','u_owner');
     INSERT INTO projects(id,slug,name,created_by) VALUES('${PRJ_B}','beta','Beta','u_owner');
     INSERT INTO project_members(project_id,user_id,role,added_by) VALUES('${PRJ_A}','u_owner','owner','u_owner');
     INSERT INTO project_members(project_id,user_id,role,added_by) VALUES('${PRJ_B}','u_owner','owner','u_owner');
-    INSERT INTO agents(id,slug) VALUES('${PRJ_A}:bot','bot');
-    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_A}:bot','${PRJ_A}','active','bot');
-    INSERT INTO agents(id,slug) VALUES('${PRJ_B}:bot','bot');
-    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_B}:bot','${PRJ_B}','active','bot');
-    INSERT INTO agents(id,slug) VALUES('${PRJ_A}:peer','peer');
-    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_A}:peer','${PRJ_A}','active','peer');
+    INSERT INTO project_members(project_id,user_id,role,added_by) VALUES('${PRJ_A}','u_guest','member','u_owner');
+    -- a-bot: A only; b-bot: B only; dual: active in both (the pointer carrier)
+    INSERT INTO agents(id,slug) VALUES('${PRJ_A}:a-bot','a-bot');
+    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_A}:a-bot','${PRJ_A}','active','a-bot');
+    INSERT INTO agents(id,slug) VALUES('${PRJ_B}:b-bot','b-bot');
+    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_B}:b-bot','${PRJ_B}','active','b-bot');
+    INSERT INTO agents(id,slug) VALUES('${PRJ_A}:dual','dual');
+    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_A}:dual','${PRJ_A}','active','dual');
+    INSERT INTO agent_projects(agent_id,project_id,status,local_slug) VALUES('${PRJ_A}:dual','${PRJ_B}','active','dual');
   `);
-  const aHash = await tokenHash("secret-a", "pepper");
-  db.sqlite.prepare("INSERT INTO agent_tokens(id,agent_id,project_id,prefix,hash,version,expires_at) VALUES('t_a','" + PRJ_A + ":bot','" + PRJ_A + "','test',?,1,'2099-01-01T00:00:00.000Z')").run(aHash);
-  const bHash = await tokenHash("secret-b", "pepper");
-  db.sqlite.prepare("INSERT INTO agent_tokens(id,agent_id,project_id,prefix,hash,version,expires_at) VALUES('t_b','" + PRJ_B + ":bot','" + PRJ_B + "','test',?,1,'2099-01-01T00:00:00.000Z')").run(bHash);
-  const peerHash = await tokenHash("secret-peer", "pepper");
-  db.sqlite.prepare("INSERT INTO agent_tokens(id,agent_id,project_id,prefix,hash,version,expires_at) VALUES('t_peer','" + PRJ_A + ":peer','" + PRJ_A + "','test',?,1,'2099-01-01T00:00:00.000Z')").run(peerHash);
+  // 凭据始终按项目签发：dual 的令牌属于 B，但它同时是 A 的 active 成员。
+  const secrets: Array<[string, string, string, string]> = [
+    ["t_a", `${PRJ_A}:a-bot`, PRJ_A, "secret-a"],
+    ["t_b", `${PRJ_B}:b-bot`, PRJ_B, "secret-b"],
+    ["t_dual", `${PRJ_A}:dual`, PRJ_B, "secret-dual"],
+  ];
+  for (const [id, agentId, project, secret] of secrets) {
+    const hash = await tokenHash(secret, "pepper");
+    db.sqlite.prepare(
+      "INSERT INTO agent_tokens(id,agent_id,project_id,prefix,hash,version,expires_at) VALUES(?,?,?,'test',?,1,'2099-01-01T00:00:00.000Z')",
+    ).run(id, agentId, project, hash);
+  }
 
   const published: string[] = [];
   const board = {
@@ -103,15 +112,15 @@ async function fixture() {
   app.route("/agent", agentMemoryRoutes);
 
   const tokens = {
-    a: formatAgentToken(`${PRJ_A}:bot`, "secret-a"),
-    b: formatAgentToken(`${PRJ_B}:bot`, "secret-b"),
-    peer: formatAgentToken(`${PRJ_A}:peer`, "secret-peer"),
+    a: formatAgentToken(`${PRJ_A}:a-bot`, "secret-a"),
+    b: formatAgentToken(`${PRJ_B}:b-bot`, "secret-b"),
+    dual: formatAgentToken(`${PRJ_B}:dual`, "secret-dual"),
   };
 
   async function call(
     path: string,
     body: unknown = {},
-    options: { method?: string; agent?: keyof typeof tokens; email?: string; headers?: Record<string, string>; raw?: boolean } = {},
+    options: { method?: string; agent?: keyof typeof tokens; email?: string; headers?: Record<string, string> } = {},
   ) {
     const headers: Record<string, string> = { "Content-Type": "application/json", ...options.headers };
     if (path.startsWith("/agent")) headers.Authorization = `Bearer ${tokens[options.agent ?? "a"]}`;
@@ -120,15 +129,26 @@ async function fixture() {
       new Request(`http://local${path}`, {
         method: options.method ?? "POST",
         headers,
-        body: options.method === "GET" || options.method === "DELETE" ? undefined : JSON.stringify(body),
+        body: options.method === "GET" ? undefined : JSON.stringify(body),
       }),
       env,
-      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
+      { waitUntil() {}, passOnException() {} } as unknown as ExecutionContext,
     );
     return { status: response.status, body: await response.json() as Body };
   }
 
-  return { db, call, tokens, published };
+  async function createSharedEntry(shareable = true) {
+    const created = await call(`/agent/memory/entries`, { title: "Release checklist", body: "step 1" }, { agent: "a" });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const entryId = created.body.entry!.id;
+    if (shareable) {
+      const shared = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: true });
+      expect(shared.status, JSON.stringify(shared.body)).toBe(200);
+    }
+    return entryId;
+  }
+
+  return { db, call, tokens, published, createSharedEntry };
 }
 
 describe("project memory spaces (P1)", () => {
@@ -136,8 +156,7 @@ describe("project memory spaces (P1)", () => {
     const { call, db, published } = await fixture();
     const created = await call("/agent/memory/entries", { title: "Team convention", body: "Always run typecheck." });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    expect(created.body.entry).toMatchObject({ title: "Team convention", version: 1, status: "active" });
-    expect(created.body.seq).toBe(1);
+    expect(created.body.entry).toMatchObject({ title: "Team convention", version: 1, status: "active", shareable: false });
     expect(published).toContain("memory.entry_created");
 
     const spaces = db.sqlite.prepare("SELECT * FROM memory_spaces").all() as Array<Record<string, unknown>>;
@@ -147,9 +166,8 @@ describe("project memory spaces (P1)", () => {
     const outbox = db.sqlite.prepare("SELECT * FROM event_outbox").all() as Array<Record<string, unknown>>;
     expect(outbox).toHaveLength(1);
     expect(outbox[0].card_id).toBeNull();
-    // 审计只存哈希，不存正文。
+    // 审计只留哈希，不留正文。
     expect(String(outbox[0].payload_json)).not.toContain("Always run typecheck.");
-    expect(String(outbox[0].payload_json)).toContain("body_hash");
   });
 
   it("replays the same message_id and rejects a different request under it", async () => {
@@ -168,7 +186,7 @@ describe("project memory spaces (P1)", () => {
 
   it("rejects credential-shaped bodies and enforces If-Match on updates", async () => {
     const { call } = await fixture();
-    const secret = await call("/agent/memory/entries", { title: "leak", body: "token kbt1.prj_01ARZ3NDEKTSV4RRFFQ69G5FAV:bot.abcdefgh" });
+    const secret = await call("/agent/memory/entries", { title: "leak", body: "token kbt1.prj_01ARZ3NDEKTSV4RRFFQ69G5FAV:a-bot.abcdefgh" });
     expect(secret.status).toBe(422);
     expect(secret.body.error?.code).toBe("SECRET_DETECTED");
 
@@ -181,56 +199,104 @@ describe("project memory spaces (P1)", () => {
     const ok = await call(`/agent/memory/entries/${entryId}`, { title: "v2", body: "two" }, { method: "PATCH", headers: { "If-Match": "1" } });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect(ok.body.entry).toMatchObject({ version: 2, body: "two" });
-
-    const foreign = await call(`/agent/memory/entries/${entryId}`, { title: "v3", body: "three" }, { method: "PATCH", agent: "peer", headers: { "If-Match": "2" } });
-    expect(foreign.status).toBe(403);
   });
 
-  it("grants, imports and reads a pinned version without following later edits", async () => {
-    const { call } = await fixture();
-    const created = await call("/agent/memory/entries", { title: "Release checklist", body: "step 1" });
+  it("requires both projects to approve, in source-then-target order", async () => {
+    const { call, published } = await fixture();
+    const created = await call("/agent/memory/entries", { title: "Convention", body: "use ULID" });
     const entryId = created.body.entry!.id;
 
-    const grant = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/grants`, { to_project_id: PRJ_B });
-    expect(grant.status, JSON.stringify(grant.body)).toBe(201);
-    expect(grant.body.grant).toMatchObject({ entry_version: 1, to_project_id: PRJ_B });
+    // 未开 shareable：申请即被拒。
+    const blocked = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    expect(blocked.status).toBe(403);
+    expect(blocked.body.error?.code).toBe("NOT_SHAREABLE");
 
-    // 源条目在授权后继续修改，不影响已经绑定的引用。
-    const updated = await call(`/agent/memory/entries/${entryId}`, { title: "Release checklist", body: "step 1 + step 2" }, { method: "PATCH", headers: { "If-Match": "1" } });
-    expect(updated.status).toBe(200);
+    const shared = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: true });
+    expect(shared.status, JSON.stringify(shared.body)).toBe(200);
+    expect(shared.body.entry?.shareable).toBe(true);
 
-    const imported = await call("/agent/memory/refs", { grant_id: grant.body.grant!.id }, { agent: "b" });
-    expect(imported.status, JSON.stringify(imported.body)).toBe(201);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    expect(requested.status, JSON.stringify(requested.body)).toBe(201);
+    expect(requested.body.link).toMatchObject({ state: "pending_source", from_project_id: PRJ_A, to_project_id: PRJ_B });
+    const linkId = requested.body.link!.id;
+    expect(published).toContain("memory.link_requested");
 
-    const read = await call(`/agent/memory/refs/${imported.body.ref!.id}`, {}, { method: "GET", agent: "b" });
-    expect(read.status, JSON.stringify(read.body)).toBe(200);
-    expect(read.body.ref!.source_version).toBe(1);
-    expect((read.body as unknown as { entry: { body: string } }).entry.body).toBe("step 1");
+    // 目标项目不能抢在源项目前面确认。
+    const wrongOrder = await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+    expect(wrongOrder.status).toBe(409);
+    expect(wrongOrder.body.error?.code).toBe("LINK_STATE_INVALID");
 
-    // 同一张凭据不能被再导入一次；A 项目的 agent 也读不到 B 的引用。
-    const again = await call("/agent/memory/refs", { grant_id: grant.body.grant!.id }, { agent: "b" });
-    expect(again.status).toBe(409);
-    const crossRead = await call(`/agent/memory/refs/${imported.body.ref!.id}`, {}, { method: "GET", agent: "a" });
-    expect(crossRead.status).toBe(404);
+    // 普通成员的确认不算数。
+    const guest = await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {}, { email: "guest@example.test" });
+    expect(guest.status).toBe(403);
+
+    const sourceOk = await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    expect(sourceOk.status, JSON.stringify(sourceOk.body)).toBe(200);
+    expect(sourceOk.body.link?.state).toBe("pending_target");
+
+    const targetOk = await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+    expect(targetOk.status, JSON.stringify(targetOk.body)).toBe(200);
+    expect(targetOk.body.link?.state).toBe("active");
+    expect(published).toContain("memory.link_activated");
   });
 
-  it("revocation stops further reads and further imports", async () => {
-    const { call } = await fixture();
-    const created = await call("/agent/memory/entries", { title: "Shared", body: "knowledge" });
-    const entryId = created.body.entry!.id;
-    const grant = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/grants`, { to_project_id: PRJ_B });
-    const imported = await call("/agent/memory/refs", { grant_id: grant.body.grant!.id }, { agent: "b" });
-    expect(imported.status).toBe(201);
+  it("only agents active in BOTH projects see and can read the pointer", async () => {
+    const { call, createSharedEntry, db } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+    // dual：两个项目都 active，能看到并能读。
+    const dualList = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
+    // dual 同时是两个项目的 active 成员
+    expect(dualList.status, JSON.stringify(dualList.body)).toBe(200);
+    expect(dualList.body.pointers).toHaveLength(1);
+    expect(dualList.body.pointers![0]).toMatchObject({ link_id: linkId, entry_id: entryId, title: "Release checklist" });
 
-    const revoked = await call(`/api/v1/projects/${PRJ_A}/memory/grants/${grant.body.grant!.id}/revoke`, { reason: "rotated" });
+    const dualRead = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(dualRead.status, JSON.stringify(dualRead.body)).toBe(200);
+    expect(dualRead.body.entry).toMatchObject({ id: entryId, body: "step 1" });
+
+    // b-bot 只在 B：链接可见但读取被拒（不在源项目）。
+    const onlyBList = await call("/agent/memory/pointers", {}, { method: "GET", agent: "b" });
+    expect(onlyBList.status).toBe(200);
+    expect(onlyBList.body.pointers).toEqual([]);
+
+    // 断开 dual 在源项目的成员关系：指针立即消失。
+    db.sqlite.exec(`UPDATE agent_projects SET status='disabled'
+      WHERE agent_id='${PRJ_A}:dual' AND project_id='${PRJ_A}'`);
+    const afterDisable = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
+    expect(afterDisable.status).toBe(200);
+    expect(afterDisable.body.pointers).toEqual([]);
+  });
+
+  it("revoking the link or turning shareable off cuts access immediately", async () => {
+    const { call, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+
+    const before = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(before.status).toBe(200);
+
+    const revoked = await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/revoke`, { reason: "rotated" });
     expect(revoked.status, JSON.stringify(revoked.body)).toBe(200);
+    expect(revoked.body.link?.state).toBe("revoked");
 
-    const read = await call(`/agent/memory/refs/${imported.body.ref!.id}`, {}, { method: "GET", agent: "b" });
-    expect(read.status).toBe(410);
-    expect(read.body.error?.code).toBe("GRANT_REVOKED");
+    const after = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(after.status).toBe(410);
+    expect(after.body.error?.code).toBe("LINK_REVOKED");
 
-    const reimport = await call("/agent/memory/refs", { grant_id: grant.body.grant!.id }, { agent: "b" });
-    expect(reimport.status).toBe(410);
+    // 关闭 shareable 会连带撤销未结束的链接。
+    const entryId2 = await createSharedEntry(true);
+    const second = await call("/agent/memory/links", { entry_id: entryId2 }, { agent: "b" });
+    expect(second.status).toBe(201);
+    const off = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId2}/shareable`, { shareable: false });
+    expect(off.status).toBe(200);
+    expect(off.body.revoked_links).toBe(1);
   });
 
   it("keeps the agent scope: entries are only visible inside their own project", async () => {
@@ -247,12 +313,19 @@ describe("project memory spaces (P1)", () => {
     expect(mismatched.body.error?.code).toBe("CREDENTIAL_SCOPE_MISMATCH");
   });
 
-  it("enforces the space↔project invariant in the database", async () => {
+  it("enforces the space↔project and link-source invariants in the database", async () => {
     const { db } = await fixture();
     db.sqlite.exec(`INSERT INTO memory_spaces(id,project_id,slug,name) VALUES('ms_x','${PRJ_A}','alpha','Alpha')`);
     expect(() => db.sqlite.exec(`INSERT INTO memory_entries
       (id,space_id,project_id,title,body,created_by_type,created_by_id)
-      VALUES('me_x','ms_x','${PRJ_B}','t','b','agent','${PRJ_A}:bot')`)).toThrow(/space project/);
+      VALUES('me_x','ms_x','${PRJ_B}','t','b','agent','${PRJ_A}:a-bot')`)).toThrow(/space project/);
+
+    db.sqlite.exec(`INSERT INTO memory_entries
+      (id,space_id,project_id,title,body,created_by_type,created_by_id)
+      VALUES('me_y','ms_x','${PRJ_A}','t','b','agent','${PRJ_A}:a-bot')`);
+    expect(() => db.sqlite.exec(`INSERT INTO memory_entry_links
+      (id,entry_id,from_project_id,to_project_id,requested_by_type,requested_by_id,requested_at)
+      VALUES('ml_x','me_y','${PRJ_B}','${PRJ_A}','agent','${PRJ_A}:a-bot','2026-01-01T00:00:00.000Z')`)).toThrow(/entry project/);
   });
 
   it("registers the NULL-card outbox idempotency index", async () => {

@@ -99,9 +99,10 @@ export const zh: Record<keyof typeof en, string> = {
   "error.SELF_DEAL_COOLDOWN": "请等待卡片冷静期结束后再自接。",
 
   "error.SECRET_DETECTED": "内容疑似包含凭据，已拒绝写入；请移除后重试。",
-  "error.GRANT_REVOKED": "该记忆引用凭据已撤销。",
-  "error.GRANT_EXPIRED": "该记忆引用凭据已过期。",
-  "error.CONTENT_HASH_MISMATCH": "引用内容与凭据记录的哈希不一致，已拒绝返回。",
-  "error.SOURCE_UNAVAILABLE": "源记忆条目在凭据绑定的版本上已不可用。",
+  "error.NOT_SHAREABLE": "该记忆未开放跨项目链接，需由作者或项目 owner/admin 先打开。",
+  "error.LINK_STATE_INVALID": "链接状态已变化，请刷新后重试。",
+  "error.LINK_REVOKED": "该跨项目链接已被撤销。",
+  "error.LINK_INACTIVE": "该跨项目链接尚未生效或已失效。",
+  "error.SOURCE_UNAVAILABLE": "源记忆条目已不可用。",
 
 };
