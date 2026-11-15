@@ -366,6 +366,69 @@ describe("project memory spaces (P1)", () => {
     expect(guest.status).toBe(403);
   });
 
+  it("lets a project owner/admin delete and contain another author's entry", async () => {
+    const { call } = await fixture();
+    const created = await call("/agent/memory/entries", { title: "leaky", body: "agent wrote this" });
+    const entryId = created.body.entry!.id;
+
+    // 普通成员既不是作者也不是 owner/admin：不能删。
+    const guest = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}`, {}, { method: "DELETE", email: "guest@example.test", headers: { "If-Match": "1" } });
+    expect(guest.status).toBe(403);
+
+    // owner 可以删（止血场景）。
+    const owner = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    expect(owner.status, JSON.stringify(owner.body)).toBe(200);
+  });
+
+  it("counts only the links revoked in this batch", async () => {
+    const { call, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry(true);
+
+    // 第一轮：申请 → 双方确认 → 手工撤销（历史 revoked = 1）。
+    const first = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const firstId = first.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${firstId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${firstId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${firstId}/revoke`, {});
+
+    // 第二轮：重新申请并生效，然后带 revoke_links 删除。
+    const second = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    const secondId = second.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${secondId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${secondId}/approve`, {});
+
+    const deleted = await call(`/agent/memory/entries/${entryId}?revoke_links=1`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    // 本批只撤销了 1 条；历史上那条不计入。
+    expect((deleted.body as unknown as { revoked_links: number }).revoked_links).toBe(1);
+  });
+
+  it("keeps the link readable and revocable after the source project is deleted", async () => {
+    const { call, createSharedEntry, db } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+
+    db.sqlite.exec(`DELETE FROM projects WHERE id='${PRJ_A}'`);
+
+    const read = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    const entry = (read.body as unknown as { entry: { body: string; source_deleted: boolean; source_missing: boolean } }).entry;
+    expect(entry.body).toBe("step 1");
+    expect(entry.source_missing).toBe(true);
+
+    // 源项目没了，由目标项目的 owner/admin 移除这条链接。
+    const removed = await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/revoke`, {});
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(removed.body.link?.state).toBe("revoked");
+
+    const after = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "b" });
+    expect(after.status).toBe(410);
+  });
+
   it("keeps the agent scope: entries are only visible inside their own project", async () => {
     const { call } = await fixture();
     const created = await call("/agent/memory/entries", { title: "alpha only", body: "not for beta" });

@@ -168,6 +168,7 @@ memoryRoutes.delete("/projects/:pid/memory/entries/:eid", requireUser, requirePr
     expectedVersion: version,
     messageId,
     revokeLinks,
+    projectRole: c.get("projectRole"),
   });
   return c.json(result);
 });
@@ -278,7 +279,10 @@ memoryRoutes.post("/projects/:pid/memory/links/:lid/revoke", requireUser, requir
   requireOwnerAdmin(c);
   const actor = humanActor(c);
   const link = await loadLink(c.env.DB, c.req.param("lid"));
-  if (link.from_project_id !== project.id) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  // 源项目删除后 from_project_id 为 NULL；此后由目标项目负责移除这条链接。
+  if (link.from_project_id !== project.id && link.to_project_id !== project.id) {
+    throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  }
   const body = await parseBody(c, linkActionInput);
 
   if (body.message_id) {

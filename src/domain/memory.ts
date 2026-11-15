@@ -319,6 +319,14 @@ export async function loadEntry(db: D1Database, entryId: string): Promise<EntryR
   return row;
 }
 
+function assertEntryDeleter(entry: EntryRow, actor: Actor, projectRole?: string | null): void {
+  const isAuthor = entry.created_by_type === actor.type && entry.created_by_id === actor.id;
+  if (isAuthor) return;
+  // 止血场景：agent 误写内容时，项目 owner/admin 也必须能删除。
+  if (actor.type === "user" && (projectRole === "owner" || projectRole === "admin")) return;
+  throw new HttpError(403, "FORBIDDEN", "only the entry author or a project owner/admin can delete this entry");
+}
+
 function assertEntryWriter(entry: EntryRow, actor: Actor): void {
   if (entry.created_by_type !== actor.type || entry.created_by_id !== actor.id) {
     throw new HttpError(403, "FORBIDDEN", "only the entry author can change this memory entry");
@@ -335,6 +343,8 @@ export async function deleteEntry(
     messageId?: string | null;
     /** 误写内容需要立刻切断时使用：同一批里把该条目的未结束链接全部撤销。 */
     revokeLinks?: boolean;
+    /** 调用方的人类项目角色，用于放行 owner/admin 删除他人条目。 */
+    projectRole?: string | null;
   },
 ): Promise<{ entry_id: string; version: number; revoked_links: number; event: Record<string, unknown> }> {
   const db = c.env.DB;
@@ -344,7 +354,7 @@ export async function deleteEntry(
   if (current.version !== input.expectedVersion) {
     throw new HttpError(409, "VERSION_CONFLICT", "memory entry version does not match If-Match", { current_version: current.version });
   }
-  assertEntryWriter(current, input.actor);
+  assertEntryDeleter(current, input.actor, input.projectRole);
 
   const nextVersion = current.version + 1;
   const now = nowIso();
@@ -371,8 +381,8 @@ export async function deleteEntry(
   });
   if (!result) throw new HttpError(409, "VERSION_CONFLICT", "memory entry changed while deleting");
   const revoked = await db
-    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked'")
-    .bind(input.entryId)
+    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked' AND revoked_at = ?2")
+    .bind(input.entryId, now)
     .first<{ c: number }>();
   return {
     entry_id: input.entryId,
@@ -430,8 +440,8 @@ export async function setShareable(
   if (!result) throw new HttpError(409, "CONFLICT", "sharing flag was not updated");
 
   const revoked = await db
-    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked'")
-    .bind(entry.id)
+    .prepare("SELECT COUNT(*) AS c FROM memory_entry_links WHERE entry_id = ?1 AND state = 'revoked' AND revoked_at = ?2")
+    .bind(entry.id, now)
     .first<{ c: number }>();
   const updated = await loadEntry(db, entry.id);
   return {
@@ -636,7 +646,9 @@ export async function revokeLink(
 ): Promise<{ link: LinkRow; event: Record<string, unknown> }> {
   const db = c.env.DB;
   const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(input.linkId).first<LinkRow>();
-  if (!link || link.from_project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  // 源项目删除后 from_project_id 为 NULL，此后只能由目标项目移除这条链接。
+  const involved = link && (link.from_project_id === input.projectId || link.to_project_id === input.projectId);
+  if (!link || !involved) throw new HttpError(404, "NOT_FOUND", "memory link not found");
   if (link.state !== "active" && link.state !== "pending_target") {
     throw new HttpError(409, "LINK_STATE_INVALID", `link is in state ${link.state}`);
   }

@@ -14,7 +14,9 @@
 --   * 链接在**双人确认生效的那一刻**把标题/正文冻结进链接行（frozen_*）。
 --     之后源条目删除，目标项目仍可读，只是标记 source_deleted=true；
 --     内容可读性不再依赖源行是否存在。
---   * space 与 project 是 1:1；项目删除时空间、条目与链接级联删除。
+--   * space 与 project 是 1:1；项目删除时空间与条目级联删除，但**链接行保留**：
+--     entry_id / from_project_id 是 ON DELETE SET NULL，冻结快照因此不会被带走，
+--     目标项目继续可读，只是 source_missing=true。
 --   * 记忆事件是项目级事件（event_outbox.card_id = NULL），因此需要一条针对
 --     NULL 卡片的部分唯一索引，否则 message_id 幂等对记忆事件不生效。
 

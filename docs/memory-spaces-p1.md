@@ -57,12 +57,13 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 
 | 动作 | 谁 | 说明 |
 |---|---|---|
-| 创建/删除条目 | 项目成员（人）；项目内 active agent | 只能删自己创建的 |
+| 创建条目 | 项目成员（人）；项目内 active agent | — |
+| 删除条目 | 作者本人；或项目 owner/admin（人类） | 止血场景必须允许 owner/admin 删除他人条目 |
 | 打开/关闭 `shareable` | **仅人类**：条目作者 或 项目 owner/admin | **agent 不能改**（现行代码有误，见差异 4） |
 | 申请链接 | 目标项目的成员（人）或 active agent | 源条目必须 `shareable=1` |
 | 确认链接 | 源项目 owner/admin；目标项目 owner/admin | 各确认一次，顺序固定 |
 | 拒绝链接 | 任一侧 owner/admin | 只在 pending 状态 |
-| 撤销链接 | 源项目 owner/admin | active 或 pending_target |
+| 撤销链接 | 源项目 **或** 目标项目的 owner/admin | active 或 pending_target；源项目删除后 from_project_id 为 NULL，由目标项目负责移除 |
 | 读取链接内容 | 目标项目 active 成员（人 + agent） | **不再校验源项目**（见 4） |
 
 ## 4. 读取：快照归目标项目
@@ -83,7 +84,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 
 ### 5.2 显式：删除并撤销（止血）
 
-- `DELETE` 接受 `{"revoke_links": true}`：同一事务里删除条目 + 把该条目所有未结束链接置为 `revoked`。
+- `DELETE ?revoke_links=1`（查询参数，与实现一致）：同一事务里删除条目 + 把该条目所有未结束链接置为 `revoked`。
 - 用于「误写进凭据」这类必须立刻切断的场景——内容不可变，删除是唯一补救，此时默认保留快照反而是风险。
 - 物理删除与源项目删除：`entry_id` / `from_project_id` 改为 `ON DELETE SET NULL`，快照与链接行保留，读取返回 `source_missing=true`。触发器改为「`from_project_id` 非空时必须等于条目所属项目」。
 - 彻底清除快照正文（purge）与上面「删除仍可读」不变量冲突，**P1 不做**，单独设计。
@@ -122,10 +123,11 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 |---|---|
 | 不可变 | PATCH 条目返回 404；DB 无 UPDATE 正文路径 |
 | 删除默认保留 | 源删除后目标读取 200，`source_deleted=true`，正文与哈希不变 |
-| 删除并撤销 | `revoke_links:true` 后链接 `revoked`，读取 410 |
-| 物理删除 | 源行与源项目删除后，链接仍可读，`source_missing=true` |
+| 删除并撤销 | `?revoke_links=1` 后链接 `revoked`，读取 410；返回的 `revoked_links` 只统计本批 |
+| 物理删除（行） | 源条目行删除后，链接仍可读，`source_missing=true` |
+| 物理删除（项目） | 源项目删除后，链接仍可读、`source_missing=true`，且目标项目 owner/admin 仍能撤销该链接 |
 | 顺序 | 目标项目先确认 → 409 `LINK_STATE_INVALID` |
-| 权限 | 普通成员确认 → 403；agent 改 `shareable` → 403 |
+| 权限 | 普通成员确认 → 403；普通成员删他人条目 → 403；owner/admin 可删；agent 无 `shareable` 路由 |
 | 目标项目可见 | 只在目标项目 active、不在源项目的 agent 也能读 |
 | 撤销 | `revoke` 后读取 410 `LINK_REVOKED`，可重新申请 |
 | 幂等 | 同 `message_id` 重放 200 duplicate；不同 body → 409 |
@@ -133,7 +135,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 配额 | 超 2000 条 → 409 `QUOTA_EXCEEDED` |
 | 隔离 | 无链接时跨项目读取一律 404 |
 
-## 11. 差异清单（已按本规格改完，PR #22 仍为 draft）
+## 11. 差异清单（v1.1：已按评审补齐，待转正式 review）
 
 1. `readPointer` / `listPointers` 去掉源项目成员校验，改为目标项目成员校验。
 2. `entry_id`、`from_project_id` 改 `SET NULL`，放宽非空约束，改触发器，补物理删除测试。
@@ -141,4 +143,10 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 4. `setShareable` 拒绝 agent（当前允许 agent 改自己创建的条目）。
 5. 迁移去掉 `frozen_version`。
 
-以上 5 项已在 `feat/memory-spaces-p1` 上落地，PR 保持 draft，等待规格确认后再请求 review。
+评审后追加（v1.1）：
+
+6. 删除权限放开到项目 owner/admin（止血场景）；agent 仍只能删自己的。
+7. `revoked_links` 改为统计本批影响行数（按 `revoked_at` 锚定），不再是历史累计。
+8. 撤销链接放开到目标项目 owner/admin，覆盖「源项目已删除、from_project_id 为 NULL」的情况。
+9. 补「删除源项目后仍可读 + 目标项目可撤销」的测试；迁移头部注释与 `SET NULL` 对齐。
+10. `revoke_links` 接口形状统一为查询参数，规格与代码一致。
