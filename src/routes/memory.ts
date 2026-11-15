@@ -14,7 +14,6 @@ import {
   revokeLink,
   setShareable,
   spaceFor,
-  updateEntry,
   type Actor,
   type LinkRow,
 } from "../domain/memory";
@@ -52,10 +51,6 @@ const entryInput = z.object({
   body: z.string(),
   tags: z.array(z.string().max(64)).max(20).optional(),
   source_card_id: z.string().trim().min(1).max(64).optional().nullable(),
-  message_id: z.string().trim().min(1).max(200).optional(),
-});
-
-const updateInput = entryInput.extend({
   message_id: z.string().trim().min(1).max(200).optional(),
 });
 
@@ -153,34 +148,6 @@ memoryRoutes.post("/projects/:pid/memory/entries", requireUser, requireProjectMe
   return c.json({ entry: result.entry, ...result.event }, 201);
 });
 
-memoryRoutes.patch("/projects/:pid/memory/entries/:eid", requireUser, requireProjectMember, async (c) => {
-  const project = c.get("project");
-  const body = await parseBody(c, updateInput);
-  const version = expectedVersion(c);
-  const actor = humanActor(c);
-
-  if (body.message_id) {
-    const previous = await findExistingProjectEvent(c, project.id, body.message_id);
-    if (previous) return c.json({ ...previous }, 200);
-  }
-
-  const result = await updateEntry(c, {
-    projectId: project.id,
-    actor,
-    entryId: c.req.param("eid"),
-    expectedVersion: version,
-    title: body.title,
-    body: body.body,
-    tags: body.tags,
-    messageId: body.message_id ?? null,
-  });
-  return c.json({ entry: result.entry, ...result.event });
-});
-
-/**
- * 作者级闸门：允许/禁止该条目被申请跨项目链接。作者本人或项目 owner/admin。
- * 关闭时同一批里撤销所有未结束的链接，立即生效。
- */
 memoryRoutes.post("/projects/:pid/memory/entries/:eid/shareable", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
   const body = await parseBody(c, shareableInput);

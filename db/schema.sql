@@ -443,6 +443,7 @@ CREATE TABLE memory_entries (
   project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title           TEXT NOT NULL,
   body            TEXT NOT NULL,
+  body_hash       TEXT NOT NULL,
   tags_json       TEXT NOT NULL DEFAULT '[]',
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
   version         INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
@@ -457,20 +458,6 @@ CREATE TABLE memory_entries (
 -- 增量同步与 /agent/cards 一致：updated_at 键集 + id 兜底，稳定排序。
 CREATE INDEX idx_memory_entries_sync ON memory_entries(space_id, updated_at, id);
 CREATE INDEX idx_memory_entries_status ON memory_entries(space_id, status, updated_at);
-
-CREATE TABLE memory_revisions (
-  id         TEXT PRIMARY KEY,
-  entry_id   TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
-  version    INTEGER NOT NULL,
-  title      TEXT NOT NULL,
-  body       TEXT NOT NULL,
-  body_hash  TEXT NOT NULL,
-  actor_type TEXT NOT NULL CHECK (actor_type IN ('agent','user','system')),
-  actor_id   TEXT NOT NULL,
-  project_id TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE (entry_id, version)
-);
 
 -- 跨项目链接：源项目与目标项目的人类各确认一次才 active。申请方可以是 agent。
 CREATE TABLE memory_entry_links (
@@ -492,7 +479,14 @@ CREATE TABLE memory_entry_links (
   rejected_reason    TEXT,
   revoked_by         TEXT,
   revoked_at         TEXT,
-  CHECK (from_project_id <> to_project_id)
+  -- 双方确认生效时冻结的内容；之后与源条目是否还在无关。
+  frozen_title       TEXT,
+  frozen_body        TEXT,
+  frozen_body_hash   TEXT,
+  frozen_version     INTEGER,
+  frozen_at          TEXT,
+  CHECK (from_project_id <> to_project_id),
+  CHECK (state <> 'active' OR (frozen_body IS NOT NULL AND frozen_body_hash IS NOT NULL))
 );
 -- 同一对 (条目, 目标项目) 同时只能有一条未结束的链接。
 CREATE UNIQUE INDEX uq_memory_link_open

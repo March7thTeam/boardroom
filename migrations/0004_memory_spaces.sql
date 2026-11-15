@@ -8,8 +8,11 @@
 --     「Agent 不因项目内写权限自动获得对外可见」。Agent 只能发起申请。
 --   * 可见范围额外受成员关系约束：只有同时在这两个项目里 active 的 agent 才会
 --     看到链接。指针是查询结果而非表，因此不存在「过期指针」。
---   * 不绑定版本/哈希：读者本身就是源项目的 active 成员、有独立读取权，链接
---     解析到当前版本不越权；版本快照只属于「发布到外部存储」的场景，本 P1 不做。
+--   * 记忆内容一经创建不可修改（只有创建与删除），因此条目没有「版本历史」，
+--     也不存在「链接跟版」的问题。
+--   * 链接在**双人确认生效的那一刻**把标题/正文冻结进链接行（frozen_*）。
+--     之后源条目删除，目标项目仍可读，只是标记 source_deleted=true；
+--     内容可读性不再依赖源行是否存在。
 --   * space 与 project 是 1:1；项目删除时空间、条目与链接级联删除。
 --   * 记忆事件是项目级事件（event_outbox.card_id = NULL），因此需要一条针对
 --     NULL 卡片的部分唯一索引，否则 message_id 幂等对记忆事件不生效。
@@ -31,6 +34,7 @@ CREATE TABLE memory_entries (
   project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title           TEXT NOT NULL,
   body            TEXT NOT NULL,
+  body_hash       TEXT NOT NULL,
   tags_json       TEXT NOT NULL DEFAULT '[]',
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted')),
   version         INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
@@ -45,20 +49,6 @@ CREATE TABLE memory_entries (
 -- 增量同步与 /agent/cards 一致：updated_at 键集 + id 兜底，稳定排序。
 CREATE INDEX idx_memory_entries_sync ON memory_entries(space_id, updated_at, id);
 CREATE INDEX idx_memory_entries_status ON memory_entries(space_id, status, updated_at);
-
-CREATE TABLE memory_revisions (
-  id         TEXT PRIMARY KEY,
-  entry_id   TEXT NOT NULL REFERENCES memory_entries(id) ON DELETE CASCADE,
-  version    INTEGER NOT NULL,
-  title      TEXT NOT NULL,
-  body       TEXT NOT NULL,
-  body_hash  TEXT NOT NULL,
-  actor_type TEXT NOT NULL CHECK (actor_type IN ('agent','user','system')),
-  actor_id   TEXT NOT NULL,
-  project_id TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE (entry_id, version)
-);
 
 -- 跨项目链接：源项目与目标项目的人类各确认一次才 active。申请方可以是 agent。
 CREATE TABLE memory_entry_links (
@@ -80,7 +70,14 @@ CREATE TABLE memory_entry_links (
   rejected_reason    TEXT,
   revoked_by         TEXT,
   revoked_at         TEXT,
-  CHECK (from_project_id <> to_project_id)
+  -- 双方确认生效时冻结的内容；之后与源条目是否还在无关。
+  frozen_title       TEXT,
+  frozen_body        TEXT,
+  frozen_body_hash   TEXT,
+  frozen_version     INTEGER,
+  frozen_at          TEXT,
+  CHECK (from_project_id <> to_project_id),
+  CHECK (state <> 'active' OR (frozen_body IS NOT NULL AND frozen_body_hash IS NOT NULL))
 );
 -- 同一对 (条目, 目标项目) 同时只能有一条未结束的链接。
 CREATE UNIQUE INDEX uq_memory_link_open

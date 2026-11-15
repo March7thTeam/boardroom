@@ -108,6 +108,7 @@ async function fixture() {
     { error: { code: error instanceof HttpError ? error.code : "INTERNAL", message: error.message } },
     (error instanceof HttpError ? error.status : 500) as 500,
   ));
+  app.notFound((c) => c.json({ error: { code: "NOT_FOUND", message: "resource not found" } }, 404));
   app.route("/api/v1", memoryRoutes);
   app.route("/agent", agentMemoryRoutes);
 
@@ -184,7 +185,7 @@ describe("project memory spaces (P1)", () => {
     expect(conflicting.body.error?.code).toBe("CONFLICT");
   });
 
-  it("rejects credential-shaped bodies and enforces If-Match on updates", async () => {
+  it("rejects credential-shaped bodies and keeps entries immutable", async () => {
     const { call } = await fixture();
     const secret = await call("/agent/memory/entries", { title: "leak", body: "token kbt1.prj_01ARZ3NDEKTSV4RRFFQ69G5FAV:a-bot.abcdefgh" });
     expect(secret.status).toBe(422);
@@ -192,13 +193,22 @@ describe("project memory spaces (P1)", () => {
 
     const created = await call("/agent/memory/entries", { title: "v1", body: "one" });
     const entryId = created.body.entry!.id;
-    const stale = await call(`/agent/memory/entries/${entryId}`, { title: "v2", body: "two" }, { method: "PATCH", headers: { "If-Match": "7" } });
-    expect(stale.status).toBe(409);
-    expect(stale.body.error?.code).toBe("VERSION_CONFLICT");
+    expect(created.body.entry).toMatchObject({ version: 1, shareable: false });
 
-    const ok = await call(`/agent/memory/entries/${entryId}`, { title: "v2", body: "two" }, { method: "PATCH", headers: { "If-Match": "1" } });
-    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect(ok.body.entry).toMatchObject({ version: 2, body: "two" });
+    // 记忆不可修改：没有 PATCH 路由，改内容只能删了重建。
+    const patched = await call(`/agent/memory/entries/${entryId}`, { title: "v2", body: "two" }, { method: "PATCH" });
+    expect(patched.status).toBe(404);
+
+    const staleDelete = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "7" } });
+    expect(staleDelete.status).toBe(409);
+    expect(staleDelete.body.error?.code).toBe("VERSION_CONFLICT");
+
+    const deleted = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect(deleted.body.entry_id).toBe(entryId);
+
+    const again = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "2" } });
+    expect(again.status).toBe(409);
   });
 
   it("requires both projects to approve, in source-then-target order", async () => {
@@ -299,6 +309,34 @@ describe("project memory spaces (P1)", () => {
     expect(off.body.revoked_links).toBe(1);
   });
 
+  it("keeps serving the frozen snapshot after the source entry is deleted", async () => {
+    const { call, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+
+    const before = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(before.status).toBe(200);
+    expect((before.body as unknown as { entry: { source_deleted: boolean } }).entry.source_deleted).toBe(false);
+
+    // 源项目删除条目：链接已冻结内容，目标项目仍然可读。
+    const deleted = await call(`/agent/memory/entries/${entryId}`, {}, { method: "DELETE", headers: { "If-Match": "1" } });
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+
+    const after = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(after.status, JSON.stringify(after.body)).toBe(200);
+    const entry = (after.body as unknown as { entry: { body: string; source_deleted: boolean; source_missing: boolean } }).entry;
+    expect(entry.body).toBe("step 1");
+    expect(entry.source_deleted).toBe(true);
+    expect(entry.source_missing).toBe(false);
+
+    const list = await call("/agent/memory/pointers", {}, { method: "GET", agent: "dual" });
+    expect(list.body.pointers).toHaveLength(1);
+    expect((list.body.pointers![0] as unknown as { source_deleted: boolean }).source_deleted).toBe(true);
+  });
+
   it("keeps the agent scope: entries are only visible inside their own project", async () => {
     const { call } = await fixture();
     const created = await call("/agent/memory/entries", { title: "alpha only", body: "not for beta" });
@@ -317,12 +355,12 @@ describe("project memory spaces (P1)", () => {
     const { db } = await fixture();
     db.sqlite.exec(`INSERT INTO memory_spaces(id,project_id,slug,name) VALUES('ms_x','${PRJ_A}','alpha','Alpha')`);
     expect(() => db.sqlite.exec(`INSERT INTO memory_entries
-      (id,space_id,project_id,title,body,created_by_type,created_by_id)
-      VALUES('me_x','ms_x','${PRJ_B}','t','b','agent','${PRJ_A}:a-bot')`)).toThrow(/space project/);
+      (id,space_id,project_id,title,body,body_hash,created_by_type,created_by_id)
+      VALUES('me_x','ms_x','${PRJ_B}','t','b','h','agent','${PRJ_A}:a-bot')`)).toThrow(/space project/);
 
     db.sqlite.exec(`INSERT INTO memory_entries
-      (id,space_id,project_id,title,body,created_by_type,created_by_id)
-      VALUES('me_y','ms_x','${PRJ_A}','t','b','agent','${PRJ_A}:a-bot')`);
+      (id,space_id,project_id,title,body,body_hash,created_by_type,created_by_id)
+      VALUES('me_y','ms_x','${PRJ_A}','t','b','h','agent','${PRJ_A}:a-bot')`);
     expect(() => db.sqlite.exec(`INSERT INTO memory_entry_links
       (id,entry_id,from_project_id,to_project_id,requested_by_type,requested_by_id,requested_at)
       VALUES('ml_x','me_y','${PRJ_B}','${PRJ_A}','agent','${PRJ_A}:a-bot','2026-01-01T00:00:00.000Z')`)).toThrow(/entry project/);

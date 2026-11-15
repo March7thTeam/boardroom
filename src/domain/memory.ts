@@ -45,6 +45,7 @@ export interface EntryRow {
   project_id: string;
   title: string;
   body: string;
+  body_hash: string;
   tags_json: string;
   status: "active" | "deleted";
   version: number;
@@ -54,19 +55,6 @@ export interface EntryRow {
   created_by_id: string;
   created_at: string;
   updated_at: string;
-}
-
-export interface RevisionRow {
-  id: string;
-  entry_id: string;
-  version: number;
-  title: string;
-  body: string;
-  body_hash: string;
-  actor_type: "agent" | "user" | "system";
-  actor_id: string;
-  project_id: string;
-  created_at: string;
 }
 
 export interface LinkRow {
@@ -87,6 +75,11 @@ export interface LinkRow {
   rejected_reason: string | null;
   revoked_by: string | null;
   revoked_at: string | null;
+  frozen_title: string | null;
+  frozen_body: string | null;
+  frozen_body_hash: string | null;
+  frozen_version: number | null;
+  frozen_at: string | null;
 }
 
 export type Actor = { type: "agent" | "user" | "system"; id: string };
@@ -292,16 +285,11 @@ export async function createEntry(
 
   const entryInsert = db
     .prepare(`INSERT INTO memory_entries
-      (id, space_id, project_id, title, body, tags_json, source_card_id, created_by_type, created_by_id, created_at, updated_at)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10)`)
-    .bind(id, space.id, input.projectId, input.title, input.body, tagsJson, input.sourceCardId ?? null, input.actor.type, input.actor.id, now);
-  const revisionInsert = db
-    .prepare(`INSERT INTO memory_revisions
-      (id, entry_id, version, title, body, body_hash, actor_type, actor_id, project_id, created_at)
-      VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9)`)
-    .bind(newId("mr"), id, input.title, input.body, bodyHash, input.actor.type, input.actor.id, input.projectId, now);
+      (id, space_id, project_id, title, body, body_hash, tags_json, source_card_id, created_by_type, created_by_id, created_at, updated_at)
+      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)`)
+    .bind(id, space.id, input.projectId, input.title, input.body, bodyHash, tagsJson, input.sourceCardId ?? null, input.actor.type, input.actor.id, now);
 
-  const result = await commitAndPublish(c, [entryInsert, revisionInsert], {
+  const result = await commitAndPublish(c, entryInsert, {
     projectId: input.projectId,
     cardId: null,
     eventType: "memory.entry_created",
@@ -336,71 +324,6 @@ function assertEntryWriter(entry: EntryRow, actor: Actor): void {
   if (entry.created_by_type !== actor.type || entry.created_by_id !== actor.id) {
     throw new HttpError(403, "FORBIDDEN", "only the entry author can change this memory entry");
   }
-}
-
-export async function updateEntry(
-  c: Context<AppEnv>,
-  input: {
-    projectId: string;
-    actor: Actor;
-    entryId: string;
-    expectedVersion: number;
-    title: string;
-    body: string;
-    tags?: string[];
-    messageId?: string | null;
-  },
-): Promise<{ entry: ReturnType<typeof publicEntry>; event: Record<string, unknown> }> {
-  const db = c.env.DB;
-  const current = await loadEntry(db, input.entryId);
-  if (current.project_id !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory entry not found");
-  if (current.status === "deleted") throw new HttpError(409, "CARD_STATE_INVALID", "memory entry is deleted");
-  if (current.version !== input.expectedVersion) {
-    throw new HttpError(409, "VERSION_CONFLICT", "memory entry version does not match If-Match", { current_version: current.version });
-  }
-  assertEntryWriter(current, input.actor);
-  assertEntryContent(input.title, input.body);
-
-  const nextVersion = current.version + 1;
-  const now = nowIso();
-  const bodyHash = await revisionHash(input.title, input.body);
-  const tagsJson = JSON.stringify(input.tags ?? []);
-
-  const update = db
-    .prepare(`UPDATE memory_entries
-      SET title = ?1, body = ?2, tags_json = ?3, version = version + 1, updated_at = ?4
-      WHERE id = ?5 AND version = ?6 AND status = 'active'`)
-    .bind(input.title, input.body, tagsJson, now, input.entryId, input.expectedVersion);
-  const revisionInsert = db
-    .prepare(`INSERT INTO memory_revisions
-      (id, entry_id, version, title, body, body_hash, actor_type, actor_id, project_id, created_at)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)`)
-    .bind(newId("mr"), input.entryId, nextVersion, input.title, input.body, bodyHash, input.actor.type, input.actor.id, current.project_id, now);
-
-  const result = await commitAndPublish(c, [update, revisionInsert], {
-    projectId: current.project_id,
-    cardId: null,
-    eventType: "memory.entry_updated",
-    actorType: input.actor.type,
-    actorId: input.actor.id,
-    payload: { entry_id: input.entryId, space_id: current.space_id, version: nextVersion, body_hash: bodyHash },
-    messageId: input.messageId ?? null,
-    receipt: { entry_id: input.entryId, version: nextVersion, body_hash: bodyHash },
-  });
-  if (!result) {
-    throw new HttpError(409, "VERSION_CONFLICT", "memory entry changed while updating", { current_version: current.version });
-  }
-
-  const updated = await loadEntry(db, input.entryId);
-  return {
-    entry: publicEntry(updated),
-    event: {
-      seq: result.seq,
-      event_id: result.event_id,
-      event_pending: result.event_pending,
-      ...(result.duplicate ? { duplicate: true } : {}),
-    },
-  };
 }
 
 export async function deleteEntry(
@@ -590,6 +513,7 @@ export async function approveLink(
 
   const expectedProject = input.side === "source" ? link.from_project_id : link.to_project_id;
   if (expectedProject !== input.projectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
+  const entry = await loadEntry(db, link.entry_id);
 
   const now = nowIso();
   let nextState: LinkRow["state"];
@@ -603,11 +527,17 @@ export async function approveLink(
       .bind(nextState, input.actor.id, now, link.id);
   } else {
     if (link.state !== "pending_target") linkStateConflict(link, "pending_target");
+    if (entry.status !== "active") {
+      throw new HttpError(409, "SOURCE_UNAVAILABLE", "source memory entry is not available");
+    }
     nextState = "active";
+    // 链接生效即冻结内容：之后源条目即使被删除，目标项目仍可读（只多一个标记）。
     statement = db
-      .prepare(`UPDATE memory_entry_links SET state = ?1, target_approved_by = ?2, target_approved_at = ?3
+      .prepare(`UPDATE memory_entry_links
+        SET state = ?1, target_approved_by = ?2, target_approved_at = ?3,
+            frozen_title = ?5, frozen_body = ?6, frozen_body_hash = ?7, frozen_version = ?8, frozen_at = ?3
         WHERE id = ?4 AND state = 'pending_target'`)
-      .bind(nextState, input.actor.id, now, link.id);
+      .bind(nextState, input.actor.id, now, link.id, entry.title, entry.body, entry.body_hash, entry.version);
   }
 
   const result = await commitAndPublish(c, statement, {
@@ -740,43 +670,69 @@ export async function listPointers(
   db: D1Database,
   agentId: string,
   targetProjectId: string,
-): Promise<Array<{ link: LinkRow; entry: { id: string; title: string; version: number } }>> {
+): Promise<Array<{ link: LinkRow; entry: { id: string; title: string; version: number; source_deleted: boolean } }>> {
   const rows = await db
-    .prepare(`SELECT l.id AS link_id, e.id AS entry_id, e.title, e.version
+    .prepare(`SELECT l.id AS link_id
       FROM memory_entry_links l
-      JOIN memory_entries e ON e.id = l.entry_id
       JOIN agent_projects ap
         ON ap.agent_id = ?1 AND ap.project_id = l.from_project_id AND ap.status = 'active'
-      WHERE l.to_project_id = ?2 AND l.state = 'active' AND e.status = 'active'
+      WHERE l.to_project_id = ?2 AND l.state = 'active'
       ORDER BY l.target_approved_at DESC
       LIMIT 200`)
     .bind(agentId, targetProjectId)
-    .all<{ link_id: string; entry_id: string; title: string; version: number }>();
+    .all<{ link_id: string }>();
 
-  // 本项目 SQL 一律用编号占位符（?N）：测试垫片只重写 ?N，裸 ? 会丢绑定。
   const ids = rows.results.map((row) => row.link_id);
+  // 本项目 SQL 一律用编号占位符（?N）：测试垫片只重写 ?N，裸 ? 会丢绑定。
   const links = ids.length
     ? await db
       .prepare(`SELECT * FROM memory_entry_links WHERE id IN (${ids.map((_, index) => `?${index + 1}`).join(",")})`)
       .bind(...ids)
       .all<LinkRow>()
     : { results: [] as LinkRow[] };
-  const byId = new Map(links.results.map((link) => [link.id, link]));
-  return rows.results
-    .filter((row) => byId.has(row.link_id))
-    .map((row) => ({
-      link: byId.get(row.link_id)!,
-      entry: { id: row.entry_id, title: row.title, version: row.version },
-    }));
+
+  const alive = new Map<string, boolean>();
+  for (const link of links.results) {
+    if (alive.has(link.entry_id)) continue;
+    const entry = await db
+      .prepare("SELECT status FROM memory_entries WHERE id = ?1")
+      .bind(link.entry_id)
+      .first<{ status: string }>();
+    alive.set(link.entry_id, Boolean(entry) && entry!.status === "active");
+  }
+
+  return links.results.map((link) => ({
+    link,
+    entry: {
+      id: link.entry_id,
+      title: link.frozen_title ?? "",
+      version: link.frozen_version ?? 0,
+      source_deleted: !alive.get(link.entry_id),
+    },
+  }));
 }
 
-/** 通过链接读取内容：平台校验「链接 active + agent 在源项目与目标项目都 active」。 */
+/**
+ * 通过链接读取内容。服务的是链接生效时冻结的快照，因此源条目删除后依然可读，
+ * 只把 `source_deleted` 置为 true —— 目标项目已获得的记忆不会被源侧撤销。
+ */
 export async function readPointer(
   db: D1Database,
   agentId: string,
   targetProjectId: string,
   linkId: string,
-): Promise<{ link: LinkRow; entry: ReturnType<typeof publicEntry> }> {
+): Promise<{
+  link: LinkRow;
+  entry: {
+    id: string;
+    title: string;
+    body: string;
+    version: number;
+    body_hash: string;
+    source_deleted: boolean;
+    source_missing: boolean;
+  };
+}> {
   const link = await db.prepare("SELECT * FROM memory_entry_links WHERE id = ?1").bind(linkId).first<LinkRow>();
   if (!link || link.to_project_id !== targetProjectId) throw new HttpError(404, "NOT_FOUND", "memory link not found");
   if (link.state !== "active") {
@@ -788,7 +744,21 @@ export async function readPointer(
     .first<{ ok: number }>();
   if (!member) throw new HttpError(403, "FORBIDDEN", "the agent is not active in the source project");
 
-  const entry = await loadEntry(db, link.entry_id);
-  if (entry.status !== "active") throw new HttpError(404, "SOURCE_UNAVAILABLE", "source memory entry is not available");
-  return { link, entry: publicEntry(entry) };
+  const source = await db
+    .prepare("SELECT status FROM memory_entries WHERE id = ?1")
+    .bind(link.entry_id)
+    .first<{ status: string }>();
+
+  return {
+    link,
+    entry: {
+      id: link.entry_id,
+      title: link.frozen_title ?? "",
+      body: link.frozen_body ?? "",
+      version: link.frozen_version ?? 0,
+      body_hash: link.frozen_body_hash ?? "",
+      source_deleted: !source || source.status !== "active",
+      source_missing: !source,
+    },
+  };
 }

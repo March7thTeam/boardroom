@@ -12,7 +12,6 @@ import {
   readPointer,
   requestLink,
   spaceFor,
-  updateEntry,
   type Actor,
 } from "../domain/memory";
 import { HttpError } from "../lib/http-error";
@@ -137,31 +136,6 @@ agentMemoryRoutes.post("/memory/entries", requireAgent, async (c) => {
   return c.json({ entry: result.entry, ...result.event }, 201);
 });
 
-agentMemoryRoutes.patch("/memory/entries/:eid", requireAgent, async (c) => {
-  const body = await parseBody(c, entryInput);
-  const projectId = assertScope(c, body.project_id);
-  const version = expectedVersion(c);
-  const actor = agentActor(c);
-  const entryId = c.req.param("eid");
-
-  if (body.message_id) {
-    const previous = await findExistingProjectEvent(c, projectId, body.message_id);
-    if (previous) return c.json({ ...previous }, 200);
-  }
-
-  const result = await updateEntry(c, {
-    projectId,
-    actor,
-    entryId,
-    expectedVersion: version,
-    title: body.title,
-    body: body.body,
-    tags: body.tags,
-    messageId: body.message_id ?? null,
-  });
-  return c.json({ entry: result.entry, ...result.event });
-});
-
 agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
   const projectId = assertScope(c, c.req.query("project_id"));
   const version = expectedVersion(c);
@@ -189,6 +163,7 @@ agentMemoryRoutes.get("/memory/pointers", requireAgent, async (c) => {
       entry_id: entry.id,
       title: entry.title,
       version: entry.version,
+      source_deleted: entry.source_deleted,
       from_project_id: link.from_project_id,
       activated_at: link.target_approved_at,
     })),
