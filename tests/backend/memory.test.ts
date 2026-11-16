@@ -466,3 +466,105 @@ describe("project memory spaces (P1)", () => {
     expect(index?.sql ?? "").toMatch(/card_id IS NULL/);
   });
 });
+
+describe("project memory spaces (P1) — review regressions", () => {
+  async function activateLink(
+    call: Awaited<ReturnType<typeof fixture>>["call"],
+    entryId: string,
+  ): Promise<string> {
+    const requested = await call(`/api/v1/projects/${PRJ_B}/memory/links`, { entry_id: entryId });
+    expect(requested.status, JSON.stringify(requested.body)).toBe(201);
+    const linkId = requested.body.link!.id;
+    expect((await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {})).status).toBe(200);
+    expect((await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {})).status).toBe(200);
+    return linkId;
+  }
+
+  it("requires an active membership, not just a token, for agent memory", async () => {
+    const { call, db, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry();
+    await activateLink(call, entryId);
+    // Credential recovery issues tokens with status 'pending'; card routes refuse
+    // them, and memory must not be the one surface that lets them through.
+    db.sqlite.exec(`UPDATE agent_projects SET status = 'pending' WHERE agent_id = '${PRJ_B}:b-bot'`);
+
+    const pointers = await call(`/agent/memory/pointers?project_id=${PRJ_B}`, {}, { method: "GET", agent: "b" });
+    expect(pointers.status, JSON.stringify(pointers.body)).toBe(403);
+    const entries = await call(`/agent/memory/entries?project_id=${PRJ_B}`, {}, { method: "GET", agent: "b" });
+    expect(entries.status, JSON.stringify(entries.body)).toBe(403);
+  });
+
+  it("counts inbound pointers even when the target project has no space yet", async () => {
+    const { call, db, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry();
+    await activateLink(call, entryId);
+
+    const overview = await call(`/agent/memory?project_id=${PRJ_B}`, {}, { method: "GET", agent: "b" });
+    expect(overview.status, JSON.stringify(overview.body)).toBe(200);
+    // B never wrote an entry, so it has no space; the snapshot is still its own.
+    expect((overview.body as { space: unknown }).space).toBeNull();
+    expect((overview.body as { pointer_count: number }).pointer_count).toBe(1);
+    const pointers = await call(`/agent/memory/pointers?project_id=${PRJ_B}`, {}, { method: "GET", agent: "b" });
+    expect((pointers.body as { pointers: unknown[] }).pointers).toHaveLength(1);
+
+    const human = await call(`/api/v1/projects/${PRJ_B}/memory`, {}, { method: "GET" });
+    expect((human.body as { links: unknown[] }).links).toHaveLength(1);
+    const rows = db.sqlite.prepare("SELECT COUNT(*) AS c FROM memory_spaces WHERE project_id = ?").get(PRJ_B) as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  it("records the delete event when revoke_links matches no open link", async () => {
+    const { call, db } = await fixture();
+    const created = await call(`/agent/memory/entries`, { title: "solo", body: "no links" }, { agent: "a" });
+    expect(created.status).toBe(201);
+    const entryId = created.body.entry!.id;
+
+    const deleted = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}?revoke_links=1`, {}, {
+      method: "DELETE",
+      headers: { "If-Match": "1" },
+    });
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect(deleted.body.revoked_links).toBe(0);
+    const events = db.sqlite
+      .prepare("SELECT COUNT(*) AS c FROM event_outbox WHERE event_type = 'memory.entry_deleted'")
+      .get() as { c: number };
+    expect(events.c, "a committed delete must always emit its audit event").toBe(1);
+  });
+
+  it("rejects a replay that flips the revoke_links intent", async () => {
+    const { call, db, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry();
+    const linkId = await activateLink(call, entryId);
+
+    const first = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}?message_id=m_contain`, {}, {
+      method: "DELETE",
+      headers: { "If-Match": "1" },
+    });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    const retry = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}?message_id=m_contain&revoke_links=1`, {}, {
+      method: "DELETE",
+      headers: { "If-Match": "1" },
+    });
+    expect(retry.status, JSON.stringify(retry.body)).toBe(409);
+    const link = db.sqlite.prepare("SELECT state FROM memory_entry_links WHERE id = ?").get(linkId) as { state: string };
+    expect(link.state, "a rejected replay must not report containment as done").toBe("active");
+  });
+
+  it("treats an unchanged shareable value as a successful no-op", async () => {
+    const { call, db } = await fixture();
+    const created = await call(`/agent/memory/entries`, { title: "flag", body: "payload" }, { agent: "a" });
+    const entryId = created.body.entry!.id;
+
+    const on = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: true });
+    expect(on.status, JSON.stringify(on.body)).toBe(200);
+    const onAgain = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: true });
+    expect(onAgain.status, JSON.stringify(onAgain.body)).toBe(200);
+    const off = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: false });
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    // Closing the flag with nothing open used to fail after the write had committed.
+    const offAgain = await call(`/api/v1/projects/${PRJ_A}/memory/entries/${entryId}/shareable`, { shareable: false });
+    expect(offAgain.status, JSON.stringify(offAgain.body)).toBe(200);
+    const row = db.sqlite.prepare("SELECT shareable FROM memory_entries WHERE id = ?").get(entryId) as { shareable: number };
+    expect(row.shareable).toBe(0);
+  });
+});

@@ -1,7 +1,7 @@
-# P1 规格 v1：项目记忆空间 + 双方确认的跨项目链接
+# P1 规格 v1.2：项目记忆空间 + 双方确认的跨项目链接
 
 范围：记忆条目、跨项目链接、审计与幂等。**不含** paste 导入导出、发布任务状态机、前端 UI。
-验收口径以本文为准；下面的差异清单说明当前 PR #22 的代码需要改哪些地方。
+验收口径以本文为准；v1.2 的差异清单与 PR #22 的代码已对齐，验收按本文逐条核对。
 
 ## 决策记录
 
@@ -11,6 +11,10 @@
 | 2026-11-15 | 删除语义：默认保留快照；额外提供原子 `revoke_links`（维护者给出的最低要求） | 需求方要求「删除后仍可读」；维护者要求「至少提供删除并撤销」 |
 | 2026-11-15 | `shareable` 仅人类可改，agent 只能申请链接 | 维护者 |
 | 2026-11-15 | 外键 `SET NULL` 保住快照；`frozen_version` 去掉；tags 随正文不可变 | 维护者 |
+| 2026-11-15 | agent 记忆读写要求**项目内 active 成员关系**，与其他 agent 路由同一守卫；`pending` 凭据一律 403 | 评审：凭据恢复会发出 pending token |
+| 2026-11-15 | 概览 `pointer_count` 只看入向链接，不依赖调用方与源项目的关系，也不依赖本地方案是否存在 | 评审：与决策 (a) 对齐 |
+| 2026-11-15 | 幂等回放必须携带相同 `revoke_links` 意图，否则 409 | 查询参数不进 request hash |
+| 2026-11-15 | 多语句批次里「写入闸门」以 CAS 语句收尾；批量撤销匹配 0 行不得让整个变更报 409 | 评审：删除已提交却无审计事件 |
 
 ## 1. 不变量
 
@@ -58,13 +62,14 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 动作 | 谁 | 说明 |
 |---|---|---|
 | 创建条目 | 项目成员（人）；项目内 active agent | — |
+| 读取条目 / 增量同步 | 项目成员（人）；项目内 **active** agent | 仅凭 token 不够：`pending` 成员关系一律 403，与其他 agent 路由同一守卫 |
 | 删除条目 | 作者本人；或项目 owner/admin（人类） | 止血场景必须允许 owner/admin 删除他人条目 |
-| 打开/关闭 `shareable` | **仅人类**：条目作者 或 项目 owner/admin | **agent 不能改**（现行代码有误，见差异 4） |
+| 打开/关闭 `shareable` | **仅人类**：条目作者 或 项目 owner/admin | agent 不能改（见差异 4） |
 | 申请链接 | 目标项目的成员（人）或 active agent | 源条目必须 `shareable=1` |
 | 确认链接 | 源项目 owner/admin；目标项目 owner/admin | 各确认一次，顺序固定 |
 | 拒绝链接 | 任一侧 owner/admin | 只在 pending 状态 |
 | 撤销链接 | 源项目 **或** 目标项目的 owner/admin | active 或 pending_target；源项目删除后 from_project_id 为 NULL，由目标项目负责移除 |
-| 读取链接内容 | 目标项目 active 成员（人 + agent） | **不再校验源项目**（见 4） |
+| 读取链接内容 / 指针列表 | 目标项目 active 成员（人 + agent） | **不再校验源项目**（见 4）；概览计数同样只看入向链接 |
 
 ## 4. 读取：快照归目标项目
 
@@ -109,7 +114,11 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 - 写路径一律走 `commitCardEvent`（`card_id = NULL`）+ `uq_outbox_project_message(project_id, message_id) WHERE card_id IS NULL`。
 - 相同 `message_id` 重放返回原 receipt（200 + `duplicate:true`），不新增事件、不改版本。
 - 相同 `message_id` 携带不同请求体 → `409 CONFLICT`。
-- 条目/链接状态变更与 outbox 写入同批原子（D1 batch）。
+- **查询参数不进 request hash**：`revoke_links` 这类查询开关必须体现为事件 `payload` 里的意图位，
+  重放时意图不一致直接 409，不能拿旧 receipt 回「已止血」。
+- 条目/链接状态变更与 outbox 写入同批原子（D1 batch）。批次以「写入闸门」结尾：多语句变更里
+  最后一条必须是那个按版本或状态 CAS 的语句。批量撤销若匹配 0 行（例如删除时没有任何未结束
+  链接）不得让整个变更返回 409——否则状态已提交而审计事件丢失。
 
 ## 9. 内容安全
 
@@ -128,6 +137,10 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 物理删除（项目） | 源项目删除后，链接仍可读、`source_missing=true`，且目标项目 owner/admin 仍能撤销该链接 |
 | 顺序 | 目标项目先确认 → 409 `LINK_STATE_INVALID` |
 | 权限 | 普通成员确认 → 403；普通成员删他人条目 → 403；owner/admin 可删；agent 无 `shareable` 路由 |
+| 权限（agent） | 成员关系为 `pending`/`disabled` → 403；只有 `active` 才能读写记忆与指针 |
+| 概览计数 | 目标项目还没有本地空间时，`pointer_count` 仍等于 `/agent/memory/pointers` 的长度；源行物理删除后计数不减 |
+| 止血重放 | 同 `message_id` 改 `revoke_links` 意图 → 409，链接保持 `active`，不得回「已止血」 |
+| 空匹配 | `?revoke_links=1` 匹配 0 行仍 200 且 `memory.entry_deleted` 事件恰 1 条；`shareable` 同值切换 → 200 |
 | 目标项目可见 | 只在目标项目 active、不在源项目的 agent 也能读 |
 | 撤销 | `revoke` 后读取 410 `LINK_REVOKED`，可重新申请 |
 | 幂等 | 同 `message_id` 重放 200 duplicate；不同 body → 409 |
@@ -135,7 +148,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 配额 | 超 2000 条 → 409 `QUOTA_EXCEEDED` |
 | 隔离 | 无链接时跨项目读取一律 404 |
 
-## 11. 差异清单（v1.1：已按评审补齐，待转正式 review）
+## 11. 差异清单（v1.2：已按两轮评审补齐，待验收）
 
 1. `readPointer` / `listPointers` 去掉源项目成员校验，改为目标项目成员校验。
 2. `entry_id`、`from_project_id` 改 `SET NULL`，放宽非空约束，改触发器，补物理删除测试。
@@ -150,3 +163,15 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 8. 撤销链接放开到目标项目 owner/admin，覆盖「源项目已删除、from_project_id 为 NULL」的情况。
 9. 补「删除源项目后仍可读 + 目标项目可撤销」的测试；迁移头部注释与 `SET NULL` 对齐。
 10. `revoke_links` 接口形状统一为查询参数，规格与代码一致。
+
+评审后追加（v1.2）：
+
+11. agent 记忆路由补 `assertAgentProjectAccess`：读写与指针都要求项目内 **active** 成员关系
+    （`pending` 凭据只说明凭据存在，不代表可操作）。
+12. `/agent/memory` 的 `pointer_count` 改为纯入向链接计数，不再关联 `agent_projects`，
+    也不因目标项目还没有本地空间而早退返回 0。
+13. `/projects/:pid/memory` 概览在项目还没有空间时也返回 `links`（目标项目可能只接收快照）。
+14. 幂等回放比对 `revoke_links` 意图（并写入事件 `payload`）：意图不同 → 409。
+15. 多语句批次把 CAS 语句放到最后作为写入闸门；`revoke_links` / 关闭 `shareable` 的批量撤销
+    匹配 0 行时不再让已提交的变更返回 409。同值切换 `shareable` 视为成功。
+16. 清理仍描述「引用凭据 / `memory_refs` / 只在两端同时 active 才可见」的过期注释。

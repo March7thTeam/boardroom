@@ -28,8 +28,8 @@ import { requireProjectMember } from "../middleware/project";
  *
  * 权限收敛为两条：
  *   * 项目成员可读写本项目空间的条目（写入一律过密钥扫描）；
- *   * 签发跨项目引用凭据需要「条目作者本人」或「项目 owner/admin」——对外可见
- *     属于人类决策，不是 agent 凭借项目内写权限就能获得的。
+ *   * 打开/关闭 `shareable` 是「条目作者本人」或「项目 owner/admin」的人类动作——
+ *     对外可见属于人类决策，agent 凭借项目内写权限也拿不到。
  */
 export const memoryRoutes = new Hono<AppEnv>();
 
@@ -95,19 +95,18 @@ function requireOwnerAdmin(c: Context<AppEnv>): void {
 memoryRoutes.get("/projects/:pid/memory", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
   const space = await spaceFor(c.env.DB, project.id);
-  if (!space) {
-    return c.json({ project_id: project.id, space: null, entry_count: 0, link_count: 0, links: [] });
-  }
+  // A target project can receive snapshots before it ever creates an entry, so
+  // the overview must still list inbound links when no space exists yet.
   const counts = await c.env.DB
     .prepare(`SELECT
       (SELECT COUNT(*) FROM memory_entries WHERE space_id = ?1 AND status = 'active') AS entry_count,
       (SELECT COUNT(*) FROM memory_entry_links l JOIN memory_entries e ON e.id = l.entry_id
         WHERE e.space_id = ?1 AND l.state = 'active') AS link_count`)
-    .bind(space.id)
+    .bind(space?.id ?? "")
     .first<{ entry_count: number; link_count: number }>();
   return c.json({
     project_id: project.id,
-    space: { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at },
+    space: space ? { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at } : null,
     entry_count: counts?.entry_count ?? 0,
     link_count: counts?.link_count ?? 0,
     links: await listLinks(c.env.DB, project.id),
@@ -158,7 +157,15 @@ memoryRoutes.delete("/projects/:pid/memory/entries/:eid", requireUser, requirePr
 
   if (messageId) {
     const previous = await findExistingProjectEvent(c, project.id, messageId);
-    if (previous) return c.json({ ...previous }, 200);
+    if (previous) {
+      // `revoke_links` is a query flag, so it is not part of the request hash.
+      // A replay that changes the containment intent must not be answered with
+      // the earlier receipt: that would report success without revoking.
+      if ((previous.revoke_links ?? false) !== revokeLinks) {
+        throw new HttpError(409, "CONFLICT", "message_id already belongs to a different request");
+      }
+      return c.json({ ...previous }, 200);
+    }
   }
 
   const result = await deleteEntry(c, {
@@ -273,7 +280,7 @@ memoryRoutes.post("/projects/:pid/memory/links/:lid/reject", requireUser, requir
   return c.json({ link: result.link, ...result.event });
 });
 
-/** 撤销只能由源项目执行：内容属于源项目。 */
+/** 撤销可由源项目或目标项目执行：源项目删除后 from_project_id 为 NULL，此时只剩目标项目。 */
 memoryRoutes.post("/projects/:pid/memory/links/:lid/revoke", requireUser, requireProjectMember, async (c) => {
   const project = c.get("project");
   requireOwnerAdmin(c);

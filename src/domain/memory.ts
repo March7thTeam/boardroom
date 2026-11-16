@@ -11,9 +11,11 @@ import { nowIso } from "../lib/time";
  *
  * 语义边界（与 GitHub #11 的决策一致）：
  *   * 1 项目 : 1 空间。空间随项目存在，没有独立 owner，也没有跨项目挂载。
- *   * 跨项目不是共享视图，而是「A 侧签发凭据 + B 侧显式登记引用」。
- *   * 引用绑定 (entry_id, entry_version, content_sha256)；源条目更新不回溯。
- *   * 凭据撤销只停止后续读取，无法收回下游已取得的副本。
+ *   * 跨项目不是共享视图：条目作者打开 `shareable`，由源项目与目标项目的人类
+ *     各确认一次；链接生效时把内容冻结进链接行。
+ *   * 快照归**目标项目**：生效后读取只校验目标项目成员关系，源条目/源项目被
+ *     删除不影响可读性（只多一个 source_deleted / source_missing 标记）。
+ *   * 记忆内容不可变，只有创建与删除；要收回访问必须显式撤销链接。
  */
 
 export const MEMORY_BODY_MAX_BYTES = 8192;
@@ -361,13 +363,19 @@ export async function deleteEntry(
   const update = db
     .prepare("UPDATE memory_entries SET status = 'deleted', version = version + 1, updated_at = ?1 WHERE id = ?2 AND version = ?3 AND status = 'active'")
     .bind(now, input.entryId, input.expectedVersion);
-  const statements: D1PreparedStatement[] = [update];
+  // The batch gate is `changes()` of the LAST statement, so the entry CAS must
+  // stay last: a bulk revoke that legitimately matches zero links would
+  // otherwise look like a failed mutation (the delete would commit with no
+  // event and the caller would be told 409).
+  const statements: D1PreparedStatement[] = [];
   if (input.revokeLinks) {
     statements.push(db
       .prepare(`UPDATE memory_entry_links SET state = 'revoked', revoked_by = ?1, revoked_at = ?2
-        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')`)
-      .bind(input.actor.id, now, input.entryId));
+        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')
+          AND EXISTS (SELECT 1 FROM memory_entries WHERE id = ?3 AND version = ?4 AND status = 'active')`)
+      .bind(input.actor.id, now, input.entryId, input.expectedVersion));
   }
+  statements.push(update);
 
   const result = await commitAndPublish(c, statements, {
     projectId: current.project_id,
@@ -375,7 +383,7 @@ export async function deleteEntry(
     eventType: "memory.entry_deleted",
     actorType: input.actor.type,
     actorId: input.actor.id,
-    payload: { entry_id: input.entryId, space_id: current.space_id, version: nextVersion },
+    payload: { entry_id: input.entryId, space_id: current.space_id, version: nextVersion, revoke_links: Boolean(input.revokeLinks) },
     messageId: input.messageId ?? null,
     receipt: { entry_id: input.entryId, version: nextVersion },
   });
@@ -415,17 +423,21 @@ export async function setShareable(
 
   const next = input.shareable ? 1 : 0;
   const now = nowIso();
-  const statements = [
-    db.prepare("UPDATE memory_entries SET shareable = ?1, updated_at = ?2 WHERE id = ?3 AND shareable <> ?1")
-      .bind(next, now, entry.id),
-  ];
+  // Same batch gate as deleteEntry: the flag UPDATE must stay last and must
+  // always touch the row, so that "close the flag while nothing is open" is a
+  // success instead of a 409 on a mutation that already happened.
+  const statements: D1PreparedStatement[] = [];
   if (next === 0) {
     statements.push(db
       .prepare(`UPDATE memory_entry_links
         SET state = 'revoked', revoked_by = ?1, revoked_at = ?2
-        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')`)
+        WHERE entry_id = ?3 AND state IN ('pending_source','pending_target','active')
+          AND EXISTS (SELECT 1 FROM memory_entries WHERE id = ?3 AND shareable = 1)`)
       .bind(input.actor.id, now, entry.id));
   }
+  statements.push(db
+    .prepare("UPDATE memory_entries SET shareable = ?1, updated_at = ?2 WHERE id = ?3")
+    .bind(next, now, entry.id));
 
   const result = await commitAndPublish(c, statements, {
     projectId: entry.project_id,
@@ -695,8 +707,8 @@ export async function listLinks(db: D1Database, projectId: string): Promise<Link
 }
 
 /**
- * 指针不是表，而是查询结果：只有**同时**在源项目与目标项目 active 的 agent 才能
- * 看到这条链接。成员关系一断，指针自然消失，不存在过期指针。
+ * 指针不是表，而是查询结果：链接生效后快照归目标项目，所以只要 agent 在
+ * 目标项目里是 active 成员就能看到这条链接（不再要求它在源项目里）。
  */
 export async function listPointers(
   db: D1Database,

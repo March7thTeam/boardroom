@@ -17,12 +17,14 @@ import {
 import { HttpError } from "../lib/http-error";
 import { parseBody } from "../lib/http";
 import { requireAgent } from "../middleware/agent";
+import { assertAgentProjectAccess } from "../domain/agent-projects";
 
 /**
  * Agent 侧记忆接口（P1）。
  *
- * 只能访问当前凭据所属项目的那一份空间；这里没有跨项目读取的入口——
- * 跨项目内容一律通过 /agent/memory/refs 引用，且引用必须由源项目签发凭据。
+ * 只能访问当前凭据所属项目的那一份空间；跨项目内容一律通过
+ * `/agent/memory/pointers` 读取——快照归目标项目，因此只要 token 所属项目
+ * 有生效链接即可读，不再要求 agent 同时属于源项目。
  */
 export const agentMemoryRoutes = new Hono<AppEnv>();
 
@@ -32,7 +34,13 @@ function scopeOf(c: Context<AppEnv>): string {
   return scope;
 }
 
-function assertScope(c: Context<AppEnv>, requested: string | null | undefined): string {
+/**
+ * Tokens exist in `pending` before activation (credential recovery issues one),
+ * so authentication alone is not enough: every memory route also requires the
+ * caller to be an **active** member of the credential's project, exactly like
+ * the card routes do through `assertAgentProjectAccess`.
+ */
+async function assertScope(c: Context<AppEnv>, requested: string | null | undefined): Promise<string> {
   const scope = scopeOf(c);
   if (requested && requested !== scope) {
     throw new HttpError(
@@ -41,6 +49,7 @@ function assertScope(c: Context<AppEnv>, requested: string | null | undefined): 
       "this agent token is bound to another project; use the token issued for that project",
     );
   }
+  await assertAgentProjectAccess(c.env.DB, c.get("agent").id, scope);
   return scope;
 }
 
@@ -78,31 +87,32 @@ function agentActor(c: { get(key: "agent"): { id: string } }): Actor {
   return { type: "agent", id: c.get("agent").id };
 }
 
-/** 空间概览：1 项目 : 1 空间，所以这里最多返回一个空间。 */
+/**
+ * 空间概览：1 项目 : 1 空间，所以这里最多返回一个空间。
+ * 目标项目可能还没有自己的空间（只接收了别人的快照），此时 entry_count 为 0，
+ * 但 pointer_count 必须照常统计——它只取决于入向链接。
+ */
 agentMemoryRoutes.get("/memory", requireAgent, async (c) => {
-  const projectId = assertScope(c, c.req.query("project_id"));
-  const agent = c.get("agent");
+  const projectId = await assertScope(c, c.req.query("project_id"));
   const space = await spaceFor(c.env.DB, projectId);
-  if (!space) return c.json({ project_id: projectId, space: null, entry_count: 0, pointer_count: 0 });
   const counts = await c.env.DB
     .prepare(`SELECT
       (SELECT COUNT(*) FROM memory_entries WHERE space_id = ?1 AND status = 'active') AS entry_count,
-      (SELECT COUNT(*) FROM memory_entry_links l
-        JOIN memory_entries e ON e.id = l.entry_id
-        JOIN agent_projects ap ON ap.agent_id = ?2 AND ap.project_id = l.from_project_id AND ap.status = 'active'
-        WHERE l.to_project_id = ?3 AND l.state = 'active' AND e.status = 'active') AS pointer_count`)
-    .bind(space.id, agent.id, projectId)
+      -- Pointer count must follow decision (a): the snapshot belongs to the
+      -- target project, so it does not depend on the caller's ties to the source.
+      (SELECT COUNT(*) FROM memory_entry_links WHERE to_project_id = ?2 AND state = 'active') AS pointer_count`)
+    .bind(space?.id ?? "", projectId)
     .first<{ entry_count: number; pointer_count: number }>();
   return c.json({
     project_id: projectId,
-    space: { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at },
+    space: space ? { id: space.id, slug: space.slug, name: space.name, created_at: space.created_at } : null,
     entry_count: counts?.entry_count ?? 0,
     pointer_count: counts?.pointer_count ?? 0,
   });
 });
 
 agentMemoryRoutes.get("/memory/entries", requireAgent, async (c) => {
-  const projectId = assertScope(c, c.req.query("project_id"));
+  const projectId = await assertScope(c, c.req.query("project_id"));
   const space = await spaceFor(c.env.DB, projectId);
   if (!space) return c.json({ project_id: projectId, entries: [], next_cursor: null, has_more: false });
   const limitRaw = Number(c.req.query("limit") ?? 50);
@@ -116,7 +126,7 @@ agentMemoryRoutes.get("/memory/entries", requireAgent, async (c) => {
 
 agentMemoryRoutes.post("/memory/entries", requireAgent, async (c) => {
   const body = await parseBody(c, entryInput);
-  const projectId = assertScope(c, body.project_id);
+  const projectId = await assertScope(c, body.project_id);
   const actor = agentActor(c);
 
   if (body.message_id) {
@@ -137,7 +147,7 @@ agentMemoryRoutes.post("/memory/entries", requireAgent, async (c) => {
 });
 
 agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
-  const projectId = assertScope(c, c.req.query("project_id"));
+  const projectId = await assertScope(c, c.req.query("project_id"));
   const version = expectedVersion(c);
   const actor = agentActor(c);
   const entryId = c.req.param("eid");
@@ -146,7 +156,14 @@ agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
 
   if (messageId) {
     const previous = await findExistingProjectEvent(c, projectId, messageId);
-    if (previous) return c.json({ ...previous }, 200);
+    if (previous) {
+      // Query flags are not part of the request hash: a replay that flips the
+      // containment intent must be a conflict, not a silent no-op receipt.
+      if ((previous.revoke_links ?? false) !== revokeLinks) {
+        throw new HttpError(409, "CONFLICT", "message_id already belongs to a different request");
+      }
+      return c.json({ ...previous }, 200);
+    }
   }
 
   const result = await deleteEntry(c, { projectId, actor, entryId, expectedVersion: version, messageId, revokeLinks });
@@ -154,7 +171,7 @@ agentMemoryRoutes.delete("/memory/entries/:eid", requireAgent, async (c) => {
 });
 
 agentMemoryRoutes.get("/memory/pointers", requireAgent, async (c) => {
-  const projectId = assertScope(c, c.req.query("project_id"));
+  const projectId = await assertScope(c, c.req.query("project_id"));
   const agent = c.get("agent");
   const pointers = await listPointers(c.env.DB, agent.id, projectId);
   return c.json({
@@ -173,7 +190,7 @@ agentMemoryRoutes.get("/memory/pointers", requireAgent, async (c) => {
 /** 发起链接申请：agent 只能申请，须由源项目与目标项目的人类各确认一次。 */
 agentMemoryRoutes.post("/memory/links", requireAgent, async (c) => {
   const body = await parseBody(c, linkInput);
-  const projectId = assertScope(c, body.project_id);
+  const projectId = await assertScope(c, body.project_id);
   const actor = agentActor(c);
 
   if (body.message_id) {
@@ -191,7 +208,7 @@ agentMemoryRoutes.post("/memory/links", requireAgent, async (c) => {
 });
 
 agentMemoryRoutes.get("/memory/pointers/:lid", requireAgent, async (c) => {
-  const projectId = assertScope(c, c.req.query("project_id"));
+  const projectId = await assertScope(c, c.req.query("project_id"));
   const agent = c.get("agent");
   const { link, entry } = await readPointer(c.env.DB, agent.id, projectId, c.req.param("lid"));
   return c.json({
