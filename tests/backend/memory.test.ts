@@ -567,4 +567,57 @@ describe("project memory spaces (P1) — review regressions", () => {
     const row = db.sqlite.prepare("SELECT shareable FROM memory_entries WHERE id = ?").get(entryId) as { shareable: number };
     expect(row.shareable).toBe(0);
   });
+
+  it("keeps link metadata but never exposes the frozen snapshot through listings", async () => {
+    const { call, createSharedEntry } = await fixture();
+    const entryId = await createSharedEntry(true);
+    const requested = await call("/agent/memory/links", { entry_id: entryId }, { agent: "b" });
+    const linkId = requested.body.link!.id;
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/approve`, {});
+    await call(`/api/v1/projects/${PRJ_B}/memory/links/${linkId}/approve`, {});
+
+    // 正文的正规入口是读取端点（仅 active）。
+    const active = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(active.status, JSON.stringify(active.body)).toBe(200);
+    expect(active.body.entry?.body).toBe("step 1");
+
+    type LinkListing = { links: Array<Record<string, unknown>> };
+    const listing = async (projectId: string) => {
+      const response = await call(`/api/v1/projects/${projectId}/memory/links`, {}, { method: "GET" });
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      return (response.body as unknown as LinkListing).links;
+    };
+
+    // 列表对项目任意成员开放，因此从不携带冻结正文——否则撤销等于没撤。
+    const beforeRevoke = (await listing(PRJ_B)).find((row) => row.id === linkId)!;
+    expect(beforeRevoke.state).toBe("active");
+    expect(Object.keys(beforeRevoke)).not.toContain("frozen_body");
+    expect(Object.keys(beforeRevoke)).not.toContain("frozen_title");
+
+    await call(`/api/v1/projects/${PRJ_A}/memory/links/${linkId}/revoke`, { reason: "rotated" });
+    const revoked = await call(`/agent/memory/pointers/${linkId}`, {}, { method: "GET", agent: "dual" });
+    expect(revoked.status).toBe(410);
+
+    const afterRevoke = (await listing(PRJ_B)).find((row) => row.id === linkId)!;
+    expect(afterRevoke.state).toBe("revoked");
+    expect(Object.keys(afterRevoke)).not.toContain("frozen_body");
+  });
+
+  it("gives a project that reuses an archived slug its own space slug", async () => {
+    const { call, db } = await fixture();
+    const first = await call("/agent/memory/entries", { title: "alpha entry", body: "one" }, { agent: "a" });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    // 归档 A：projects.slug 改成 archived-*（原 slug 释放给新项目），空间仍占着 alpha。
+    db.sqlite.exec(`UPDATE projects SET slug = 'archived-alpha-1a2b3c4d',
+      archived_at = '2026-05-01T00:00:00.000Z' WHERE id = '${PRJ_A}'`);
+    db.sqlite.exec(`INSERT INTO projects(id,slug,name,created_by) VALUES('prj_reuse','alpha','Alpha Two','u_owner')`);
+    db.sqlite.exec(`INSERT INTO project_members(project_id,user_id,role,added_by)
+      VALUES('prj_reuse','u_owner','owner','u_owner')`);
+
+    const created = await call("/api/v1/projects/prj_reuse/memory/entries", { title: "reused", body: "two" });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const slugs = (db.sqlite.prepare("SELECT slug FROM memory_spaces ORDER BY slug").all() as Array<{ slug: string }>)
+      .map((row) => row.slug);
+    expect(slugs).toEqual(["alpha", "alpha-2"]);
+  });
 });

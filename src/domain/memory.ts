@@ -134,6 +134,26 @@ export function assertEntryContent(title: string, body: string): void {
   }
 }
 
+/**
+ * 空间 slug 只是显示标签，不承担命名空间。`memory_spaces.slug` 上有 UNIQUE，
+ * 而项目归档时会把 `projects.slug` 改成 `archived-*` 以释放原 slug 供新项目复用，
+ * 空间却仍占着旧值——直接按 `projects.slug` 插入会让「历史上有人用过这个 slug」
+ * 变成新项目写记忆时的 UNIQUE 500。分配时按占用情况加 `-2`、`-3` 后缀。
+ */
+async function allocateSpaceSlug(db: D1Database, base: string): Promise<string> {
+  const rows = await db
+    .prepare("SELECT slug FROM memory_spaces WHERE slug = ?1 OR slug LIKE ?2")
+    .bind(base, `${base}-%`)
+    .all<{ slug: string }>();
+  const taken = new Set(rows.results.map((row) => row.slug));
+  if (!taken.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new HttpError(409, "CONFLICT", "memory space slug exhausted");
+}
+
 /** Space 与 project 是 1:1：首次写入时惰性创建，冲突时复用已存在的那一行。 */
 export async function ensureSpace(db: D1Database, projectId: string): Promise<SpaceRow> {
   const existing = await db
@@ -150,7 +170,7 @@ export async function ensureSpace(db: D1Database, projectId: string): Promise<Sp
 
   await db
     .prepare("INSERT INTO memory_spaces(id, project_id, slug, name, created_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(project_id) DO NOTHING")
-    .bind(newId("ms"), project.id, project.slug, project.name, nowIso())
+    .bind(newId("ms"), project.id, await allocateSpaceSlug(db, project.slug), project.name, nowIso())
     .run();
 
   const created = await db
@@ -695,14 +715,25 @@ export async function revokeLink(
   };
 }
 
+/**
+ * 链接列表只回元数据：冻结的正文与哈希只经读取端点（`readPointer`，仅 `active`）
+ * 放行。撤销（含 `shareable` 关闭、`DELETE ?revoke_links=1`）之后仍能从列表读回
+ * 正文，等于撤销没生效——列表接口对项目**任意成员**开放，泄漏面比读取端点更大。
+ */
+export type LinkSummary = Omit<LinkRow, "frozen_title" | "frozen_body" | "frozen_body_hash" | "frozen_at">;
+
 /** 项目视角的链接列表（源方向 + 目标方向），供人类审批面板使用。 */
-export async function listLinks(db: D1Database, projectId: string): Promise<LinkRow[]> {
+export async function listLinks(db: D1Database, projectId: string): Promise<LinkSummary[]> {
   const rows = await db
-    .prepare(`SELECT * FROM memory_entry_links
+    .prepare(`SELECT id, entry_id, from_project_id, to_project_id, state,
+        requested_by_type, requested_by_id, requested_at,
+        source_approved_by, source_approved_at, target_approved_by, target_approved_at,
+        rejected_by, rejected_at, rejected_reason, revoked_by, revoked_at
+      FROM memory_entry_links
       WHERE from_project_id = ?1 OR to_project_id = ?1
       ORDER BY requested_at DESC LIMIT 200`)
     .bind(projectId)
-    .all<LinkRow>();
+    .all<LinkSummary>();
   return rows.results;
 }
 

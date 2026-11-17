@@ -1,7 +1,7 @@
-# P1 规格 v1.2：项目记忆空间 + 双方确认的跨项目链接
+# P1 规格 v1.3：项目记忆空间 + 双方确认的跨项目链接
 
 范围：记忆条目、跨项目链接、审计与幂等。**不含** paste 导入导出、发布任务状态机、前端 UI。
-验收口径以本文为准；v1.2 的差异清单与 PR #22 的代码已对齐，验收按本文逐条核对。
+验收口径以本文为准；v1.3 的差异清单与 PR #22 的代码已对齐，验收按本文逐条核对。
 
 ## 决策记录
 
@@ -15,6 +15,8 @@
 | 2026-11-15 | 概览 `pointer_count` 只看入向链接，不依赖调用方与源项目的关系，也不依赖本地方案是否存在 | 评审：与决策 (a) 对齐 |
 | 2026-11-15 | 幂等回放必须携带相同 `revoke_links` 意图，否则 409 | 查询参数不进 request hash |
 | 2026-11-15 | 多语句批次里「写入闸门」以 CAS 语句收尾；批量撤销匹配 0 行不得让整个变更报 409 | 评审：删除已提交却无审计事件 |
+| 2026-11-17 | 链接**列表只回元数据**：`frozen_*` 不出现在列表里，正文只能经 `readPointer`（仅 `active`）读取 | 评审：撤销后仍能从列表读回正文，撤销形同虚设 |
+| 2026-11-17 | `memory_spaces.slug` 只是显示标签、不承担命名空间：分配时按占用加 `-2`/`-3` 后缀，不随项目归档改名 | 评审：归档释放的 slug 被新项目复用时，首次写记忆撞 UNIQUE 500 |
 
 ## 1. 不变量
 
@@ -57,6 +59,10 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 
 删除 `frozen_version`：内容不可变后它恒为 1，没有语义；保留 `frozen_body_hash` 作为内容指纹。
 
+`memory_spaces.slug` 是显示标签，不是命名空间：项目归档会把 `projects.slug` 改成 `archived-*` 以释放
+原 slug 供新项目复用，而空间仍占着旧值（schema 上 `slug UNIQUE`）。因此分配空间 slug 时按占用加
+`-2`、`-3` 后缀，且归档/恢复不改写空间 slug——项目的命名空间只由 `projects.slug` 与 `project_id` 决定。
+
 ## 3. 权限矩阵
 
 | 动作 | 谁 | 说明 |
@@ -78,6 +84,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 - 读取只校验「读者是目标项目的 active 成员」+「链接属于该目标项目」+「链接 state=active」。
 - **不再检查读者是否在源项目**。这同时意味着：源项目删除该条目后，源项目自己的成员也只能经目标项目的链接读到快照——这是有意的，因为删除只是「源项目下线这份知识」，不是「从平台抹除」。
 - 「同时参与两个项目」不再是访问控制条件，只保留为申请时的便利（谁的 agent 两边都在，谁更容易发现该申请哪条）；链接本身由两侧人类确认，不依赖成员重叠。
+- **列表不等于读取**：`GET /projects/:pid/memory/links` 与概览里的 `links` 对项目**任意成员**开放，因此只回元数据（状态、双方确认/撤销信息），`frozen_title/body/body_hash` 一律不出现在列表里。正文的唯一入口是 `readPointer`，它要求 `state='active'`；撤销、关闭 `shareable`、`DELETE ?revoke_links=1` 之后列表仍能看到状态变化，但读不到正文。
 
 ## 5. 删除语义
 
@@ -143,6 +150,8 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 | 空匹配 | `?revoke_links=1` 匹配 0 行仍 200 且 `memory.entry_deleted` 事件恰 1 条；`shareable` 同值切换 → 200 |
 | 目标项目可见 | 只在目标项目 active、不在源项目的 agent 也能读 |
 | 撤销 | `revoke` 后读取 410 `LINK_REVOKED`，可重新申请 |
+| 列表脱敏 | `GET /projects/:pid/memory/links` 与概览 `links` 在任何状态下都不含 `frozen_title/body/body_hash`；撤销后列表只剩元数据，正文不可得 |
+| slug 复用 | 项目归档释放 slug 后，新项目复用同名 slug 首次写记忆返回 201，空间 slug 取 `-2` 后缀 |
 | 幂等 | 同 `message_id` 重放 200 duplicate；不同 body → 409 |
 | 扫描 | 含 `kbt1.`/`ghp_` 等特征 → 422 |
 | 配额 | 超 2000 条 → 409 `QUOTA_EXCEEDED` |
@@ -175,3 +184,7 @@ uq_memory_link_open(entry_id, to_project_id) WHERE state IN ('pending_source','p
 15. 多语句批次把 CAS 语句放到最后作为写入闸门；`revoke_links` / 关闭 `shareable` 的批量撤销
     匹配 0 行时不再让已提交的变更返回 409。同值切换 `shareable` 视为成功。
 16. 清理仍描述「引用凭据 / `memory_refs` / 只在两端同时 active 才可见」的过期注释。
+17. 链接列表（`GET /projects/:pid/memory/links` 与概览 `links`）改为元数据视图（`LinkSummary`）：
+    `frozen_*` 不再序列化给项目成员，正文只经 `readPointer`（仅 `active`）读取。
+18. `ensureSpace` 分配空间 slug 时按占用加后缀（`-2`/`-3`…），归档释放的 slug 被新项目复用时不再 500；
+    空间 slug 明确为显示标签，不随项目归档改名。
