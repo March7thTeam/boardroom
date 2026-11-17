@@ -97,4 +97,11 @@ export const en = {
 
   "error.SELF_DEAL_COOLDOWN": "Wait for this card’s cooldown before self-dealing.",
 
+  "error.SECRET_DETECTED": "The content looks like it contains a credential and was rejected.",
+  "error.NOT_SHAREABLE": "This memory entry is not open for cross-project linking yet.",
+  "error.LINK_STATE_INVALID": "The link state changed; reload and retry.",
+  "error.LINK_REVOKED": "This cross-project link has been revoked.",
+  "error.LINK_INACTIVE": "This cross-project link is not active.",
+  "error.SOURCE_UNAVAILABLE": "The source memory entry is no longer available.",
+
 } as const;
